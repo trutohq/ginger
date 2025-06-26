@@ -165,7 +165,6 @@ export class Service<
         include,
         orderBy,
         limit: actualLimit,
-        auth: params.auth,
         cursorConditions,
       })
 
@@ -260,7 +259,6 @@ export class Service<
         columns,
         joins: this.joins,
         include,
-        auth: opts.auth,
       })
 
       const stmt = this.db.prepare(sql)

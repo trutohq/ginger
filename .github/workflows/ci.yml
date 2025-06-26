@@ -35,10 +35,10 @@ jobs:
         run: bun run lint
 
       - name: Run tests
-        run: bun run test
+        run: bun test
 
       - name: Run tests with coverage
-        run: bun run test:coverage
+        run: bun test --coverage --coverage-reporter=lcov,text --coverage-dir=coverage
 
   security:
     name: Security Scan

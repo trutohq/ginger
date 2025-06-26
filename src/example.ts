@@ -39,6 +39,12 @@ const TeamRowSchema = z.object({
 })
 
 // Join definitions
+// Note: Auth-based filtering (like tenant_id checks) should NOT be embedded in join definitions.
+// Instead, handle them through:
+// 1. Hooks that modify where clauses before queries
+// 2. Proper database design with foreign keys
+// 3. Service-level filtering logic
+// 4. Row-level security in the database
 const userJoins = {
   teams: {
     kind: 'many',
@@ -54,8 +60,7 @@ const userJoins = {
       select: ['id', 'name', 'description'],
       alias: 'team',
     },
-    where: (ctx) =>
-      `teams.active = 1 AND teams.tenant_id = '${ctx.auth.user?.tenantId || ''}'`,
+    where: 'teams.active = 1',
     schema: TeamRowSchema,
   },
 } satisfies Record<string, JoinDef>
@@ -96,6 +101,12 @@ function createUsersService(db: any, encryptionKeys: Record<string, string>) {
             ctx.params.where = {}
           }
           ctx.params.where.tenantId = ctx.auth.user.tenantId
+
+          // For joins that need tenant filtering, you can:
+          // 1. Ensure proper foreign key relationships in your database schema
+          // 2. Use additional where clauses on the main query
+          // 3. Implement custom filtering logic in hooks
+          // The join definitions remain clean and auth-agnostic
         },
       },
       get: {
@@ -161,6 +172,12 @@ export default {
               ctx.params.where = {}
             }
             ctx.params.where.tenantId = ctx.auth.user.tenantId
+
+            // For joins that need tenant filtering, you can:
+            // 1. Ensure proper foreign key relationships in your database schema
+            // 2. Use additional where clauses on the main query
+            // 3. Implement custom filtering logic in hooks
+            // The join definitions remain clean and auth-agnostic
           },
         },
         create: {

@@ -1,6 +1,6 @@
 import { compileFilter, sql } from '@truto/sqlite-builder'
 import { SqlBuilderError } from './errors.js'
-import type { AuthContext, JoinDef, OrderBy } from './types.js'
+import type { JoinDef, OrderBy } from './types.js'
 
 /**
  * Build a SELECT query with joins and pagination
@@ -15,7 +15,6 @@ export function buildSelect(
     orderBy?: OrderBy[]
     limit?: number
     offset?: number
-    auth?: AuthContext
     cursorConditions?: { sql: string; params: unknown[] }
   } = {},
 ): { sql: string; params: unknown[] } {
@@ -55,7 +54,7 @@ export function buildSelect(
     if (options.joins && options.include) {
       for (const [joinName, joinDef] of Object.entries(options.joins)) {
         if (options.include[joinName]) {
-          const joinSql = buildJoin(table, joinName, joinDef, options.auth)
+          const joinSql = buildJoin(table, joinName, joinDef)
           query = sql`${query} ${sql.raw(joinSql.sql)}`
           // Note: Join conditions are embedded in the JOIN clause
         }
@@ -63,26 +62,26 @@ export function buildSelect(
     }
 
     // Build WHERE conditions and collect parameters
-    const whereConditions: Parameters<typeof sql.join>[0] = []
+    const whereConditions: string[] = []
     const allParams: unknown[] = []
 
     // Regular WHERE conditions
     if (options.where && Object.keys(options.where).length > 0) {
       const whereFilter = compileFilter(options.where as any)
-      whereConditions.push(sql.raw(whereFilter.text))
+      whereConditions.push(whereFilter.text)
       allParams.push(...whereFilter.values)
     }
 
     // Cursor conditions
     if (options.cursorConditions && options.cursorConditions.sql) {
-      whereConditions.push(sql.raw(options.cursorConditions.sql))
+      whereConditions.push(options.cursorConditions.sql)
       allParams.push(...options.cursorConditions.params)
     }
 
     // Add WHERE clause if needed
     if (whereConditions.length > 0) {
-      const combinedWhere = sql.join(whereConditions, ' AND ')
-      query = sql`${query} WHERE ${combinedWhere}`
+      const combinedWhere = whereConditions.join(' AND ')
+      query = sql`${query} WHERE ${sql.raw(combinedWhere)}`
     }
 
     // Add ORDER BY
@@ -125,7 +124,6 @@ function buildJoin(
   baseTable: string,
   joinName: string,
   joinDef: JoinDef,
-  auth?: AuthContext,
 ): { sql: string; params: unknown[] } {
   const { remote, localPk, through } = joinDef
 
@@ -142,14 +140,7 @@ function buildJoin(
 
   // Add WHERE condition for the join if specified
   if (joinDef.where) {
-    const whereCondition =
-      typeof joinDef.where === 'function'
-        ? joinDef.where({ auth: auth || {} })
-        : joinDef.where
-
-    if (whereCondition) {
-      joinSql += ` AND ${whereCondition}`
-    }
+    joinSql += ` AND ${joinDef.where}`
   }
 
   return { sql: joinSql, params: [] }
@@ -202,7 +193,7 @@ export function buildUpdate(
     const setValues = Object.values(data)
 
     // Build WHERE clause
-    const whereFilter = compileFilter(where)
+    const whereFilter = compileFilter(where as any)
 
     const query = sql`
       UPDATE ${sql.ident(table)} 
@@ -230,7 +221,7 @@ export function buildDelete(
   where: Record<string, unknown>,
 ): { sql: string; params: unknown[] } {
   try {
-    const whereFilter = compileFilter(where)
+    const whereFilter = compileFilter(where as any)
 
     const query = sql`
       DELETE FROM ${sql.ident(table)}
@@ -261,7 +252,7 @@ export function buildCount(
     const allParams: unknown[] = []
 
     if (where && Object.keys(where).length > 0) {
-      const whereFilter = compileFilter(where)
+      const whereFilter = compileFilter(where as any)
       query = sql`${query} WHERE ${sql.raw(whereFilter.text)}`
       allParams.push(...whereFilter.values)
     }
@@ -289,7 +280,6 @@ export function buildSelectById(
     columns?: string[]
     joins?: Record<string, JoinDef>
     include?: Record<string, boolean>
-    auth?: AuthContext
   } = {},
 ): { sql: string; params: unknown[] } {
   const where: Record<string, unknown> = {}

@@ -36,9 +36,6 @@
     "lint": "eslint",
     "lint:fix": "eslint --fix",
     "prepublishOnly": "bun run typecheck && bun run lint && bun test && bun run build",
-    "test": "vitest",
-    "test:coverage": "vitest --coverage",
-    "test:ui": "vitest --ui",
     "typecheck": "tsc --noEmit"
   },
   "lint-staged": {

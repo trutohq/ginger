@@ -215,7 +215,7 @@ export interface JoinDef {
     select: string[]
     alias?: string
   }
-  where?: string | ((ctx: { auth: AuthContext }) => string)
+  where?: string
   schema: z.ZodTypeAny
 }
 

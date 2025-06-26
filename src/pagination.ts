@@ -1,3 +1,4 @@
+import { sql } from '@truto/sqlite-builder'
 import { CursorError } from './errors.js'
 import type { CursorToken, OrderBy } from './types.js'
 
@@ -95,7 +96,7 @@ export function createCursor(
 export function buildCursorConditions(
   cursor: CursorToken,
   tableName?: string,
-): { sql: string; params: unknown[] } {
+): ReturnType<typeof sql> {
   const { orderBy, values, direction } = cursor
 
   if (orderBy.length !== values.length) {
@@ -106,19 +107,22 @@ export function buildCursorConditions(
   }
 
   if (orderBy.length === 0) {
-    return { sql: '', params: [] }
+    return sql``
   }
 
   // Build comparison conditions for cursor pagination
   // For next: use > or < based on sort direction
   // For prev: use < or > based on sort direction (opposite)
-  const conditions: string[] = []
-  const params: unknown[] = []
+  const conditions: ReturnType<typeof sql>[] = []
 
   for (let i = 0; i < orderBy.length; i++) {
     const order = orderBy[i]!
     const value = values[i]
-    const columnName = tableName ? `${tableName}.${order.column}` : order.column
+
+    // Build column identifier safely
+    const columnIdent = tableName
+      ? sql.ident(`${tableName}.${order.column}`)
+      : sql.ident(order.column)
 
     // Determine comparison operator
     let operator: string
@@ -130,23 +134,24 @@ export function buildCursorConditions(
 
     if (i === orderBy.length - 1) {
       // Last column: simple comparison
-      conditions.push(`${columnName} ${operator} ?`)
-      params.push(value)
+      const operatorFragment = sql.raw(operator)
+      conditions.push(sql`${columnIdent} ${operatorFragment} ${value}`)
     } else {
       // Multi-column: build composite condition
       // (col1 = ? AND col2 = ? AND ... AND colN > ?) OR
       // (col1 = ? AND col2 = ? AND ... AND colN-1 > ?) OR
       // ...
       // (col1 > ?)
-      const equalityConditions: string[] = []
-      const equalityParams: unknown[] = []
+      const equalityConditions: ReturnType<typeof sql>[] = []
 
       for (let j = 0; j <= i; j++) {
         const currentOrder = orderBy[j]!
         const currentValue = values[j]
-        const currentColumnName = tableName
-          ? `${tableName}.${currentOrder.column}`
-          : currentOrder.column
+
+        // Build current column identifier safely
+        const currentColumnIdent = tableName
+          ? sql.ident(`${tableName}.${currentOrder.column}`)
+          : sql.ident(currentOrder.column)
 
         if (j === i) {
           // Last condition in this group: use comparison
@@ -156,21 +161,22 @@ export function buildCursorConditions(
           } else {
             currentOperator = currentOrder.direction === 'asc' ? '<' : '>'
           }
-          equalityConditions.push(`${currentColumnName} ${currentOperator} ?`)
+          const currentOperatorFragment = sql.raw(currentOperator)
+          equalityConditions.push(
+            sql`${currentColumnIdent} ${currentOperatorFragment} ${currentValue}`,
+          )
         } else {
           // Earlier conditions: use equality
-          equalityConditions.push(`${currentColumnName} = ?`)
+          equalityConditions.push(sql`${currentColumnIdent} = ${currentValue}`)
         }
-        equalityParams.push(currentValue)
       }
 
-      conditions.push(`(${equalityConditions.join(' AND ')})`)
-      params.push(...equalityParams)
+      const compositeCondition = sql.join(equalityConditions, ' AND ')
+      conditions.push(sql`(${compositeCondition})`)
     }
   }
 
-  const sql = conditions.length > 0 ? conditions.join(' OR ') : ''
-  return { sql, params }
+  return conditions.length > 0 ? sql.join(conditions, ' OR ') : sql``
 }
 
 /**

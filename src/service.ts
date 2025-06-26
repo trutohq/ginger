@@ -1,3 +1,4 @@
+import { sql } from '@truto/sqlite-builder'
 import type { z } from 'zod/v4'
 import { decryptSecrets, DefaultKeyProvider, encryptSecrets } from './crypto.js'
 import {
@@ -131,7 +132,7 @@ export class Service<
       validateOrderBy(orderBy, allowedColumns)
 
       // Handle cursor pagination
-      let cursorConditions: { sql: string; params: unknown[] } | undefined
+      let cursorConditions: ReturnType<typeof sql> | undefined
       let actualLimit = limit + 1 // Fetch one extra to determine if there's a next page
 
       if (cursor) {
@@ -158,7 +159,7 @@ export class Service<
       const columns = this.getSelectColumns(includeSecrets)
 
       // Build and execute query
-      const { sql, params: sqlParams } = buildSelect(this.table, {
+      const { text: query, values: sqlParams } = buildSelect(this.table, {
         columns,
         where,
         joins: this.joins,
@@ -168,7 +169,7 @@ export class Service<
         cursorConditions,
       })
 
-      const stmt = this.db.prepare(sql)
+      const stmt = this.db.prepare(query)
       const result = await stmt.bind(...sqlParams).all()
 
       if (!result.success) {
@@ -255,13 +256,18 @@ export class Service<
       const columns = this.getSelectColumns(includeSecrets)
 
       // Build and execute query
-      const { sql, params } = buildSelectById(this.table, this.primaryKey, id, {
-        columns,
-        joins: this.joins,
-        include,
-      })
+      const { text: query, values: params } = buildSelectById(
+        this.table,
+        this.primaryKey,
+        id,
+        {
+          columns,
+          joins: this.joins,
+          include,
+        },
+      )
 
-      const stmt = this.db.prepare(sql)
+      const stmt = this.db.prepare(query)
       const result = await stmt.bind(...params).first()
 
       if (!result) {
@@ -342,8 +348,11 @@ export class Service<
       }
 
       // Build and execute insert
-      const { sql, params } = buildInsert(this.table, processedData)
-      const stmt = this.db.prepare(sql)
+      const { text: query, values: params } = buildInsert(
+        this.table,
+        processedData,
+      )
+      const stmt = this.db.prepare(query)
       const result = await stmt.bind(...params).run()
 
       if (!result.success) {
@@ -430,8 +439,12 @@ export class Service<
       }
 
       // Build and execute update
-      const { sql, params } = buildUpdate(this.table, processedData, where)
-      const stmt = this.db.prepare(sql)
+      const { text: query, values: params } = buildUpdate(
+        this.table,
+        processedData,
+        where,
+      )
+      const stmt = this.db.prepare(query)
       const result = await stmt.bind(...params).run()
 
       if (!result.success) {
@@ -492,8 +505,8 @@ export class Service<
       }
 
       // Build and execute delete
-      const { sql, params } = buildDelete(this.table, where)
-      const stmt = this.db.prepare(sql)
+      const { text: query, values: params } = buildDelete(this.table, where)
+      const stmt = this.db.prepare(query)
       const result = await stmt.bind(...params).run()
 
       if (!result.success) {
@@ -533,8 +546,8 @@ export class Service<
       const { where = {} } = params
 
       // Build and execute count query
-      const { sql, params: sqlParams } = buildCount(this.table, where)
-      const stmt = this.db.prepare(sql)
+      const { text: query, values: sqlParams } = buildCount(this.table, where)
+      const stmt = this.db.prepare(query)
       const result = await stmt.bind(...sqlParams).first()
 
       if (!result) {
@@ -558,7 +571,7 @@ export class Service<
    * Execute custom SQL query
    */
   async query<T = z.infer<TRow>>(
-    sql: string,
+    query: string,
     opts: QueryParams & MethodOptions = { auth: {} },
     ...sqlParams: unknown[]
   ): Promise<T[]> {
@@ -576,7 +589,7 @@ export class Service<
       const { includeSecrets = false } = opts
 
       // Execute the query
-      const stmt = this.db.prepare(sql)
+      const stmt = this.db.prepare(query)
       const result =
         sqlParams.length > 0
           ? await stmt.bind(...sqlParams).all()

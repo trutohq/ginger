@@ -491,8 +491,8 @@ describe('D1 Library - Comprehensive Tests', () => {
         }
 
         const conditions = buildCursorConditions(token, 'users')
-        expect(conditions.sql).toBeTruthy()
-        expect(conditions.params).toEqual([2])
+        expect(conditions.text).toBeTruthy()
+        expect(conditions.values).toEqual([2])
       })
     })
   })

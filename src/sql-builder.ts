@@ -15,17 +15,19 @@ export function buildSelect(
     orderBy?: OrderBy[]
     limit?: number
     offset?: number
-    cursorConditions?: { sql: string; params: unknown[] }
+    cursorConditions?: ReturnType<typeof sql>
   } = {},
-): { sql: string; params: unknown[] } {
+): ReturnType<typeof sql> {
   try {
     // Build column list
-    const selectColumns: string[] = []
+    const selectColumns: ReturnType<typeof sql>[] = []
 
     if (options.columns && options.columns.length > 0) {
-      selectColumns.push(...options.columns.map((col) => `${table}.${col}`))
+      selectColumns.push(
+        ...options.columns.map((col) => sql.ident(`${table}.${col}`)),
+      )
     } else {
-      selectColumns.push(`${table}.*`)
+      selectColumns.push(sql`${sql.ident(table)}.*`)
     }
 
     // Add join columns
@@ -34,81 +36,74 @@ export function buildSelect(
         if (options.include[joinName]) {
           const joinAlias = joinDef.remote.alias || joinName
           const joinColumns = joinDef.remote.select.map(
-            (col) => `${joinDef.remote.table}.${col} as ${joinAlias}_${col}`,
+            (col) =>
+              sql`${sql.ident(`${joinDef.remote.table}.${col}`)} as ${sql.ident(`${joinAlias}_${col}`)}`,
           )
           selectColumns.push(...joinColumns)
         }
       }
     }
 
-    // Start building the query
-    // Handle wildcard columns separately since sql.ident doesn't support them
-    const columnList =
-      selectColumns.length === 1 && selectColumns[0] === `${table}.*`
-        ? sql.raw(`${table}.*`)
-        : sql.raw(selectColumns.join(', '))
-
-    let query = sql`SELECT ${columnList} FROM ${sql.ident(table)}`
+    // Start building the query using sql.join for the column fragments
+    let query = sql`SELECT ${sql.join(selectColumns, ', ')} FROM ${sql.ident(table)}`
 
     // Add joins
     if (options.joins && options.include) {
+      const joinFragments: ReturnType<typeof sql>[] = []
       for (const [joinName, joinDef] of Object.entries(options.joins)) {
         if (options.include[joinName]) {
-          const joinSql = buildJoin(table, joinName, joinDef)
-          query = sql`${query} ${sql.raw(joinSql.sql)}`
-          // Note: Join conditions are embedded in the JOIN clause
+          joinFragments.push(buildJoin(table, joinDef))
         }
+      }
+      if (joinFragments.length > 0) {
+        query = sql.join([query, ...joinFragments], ' ')
       }
     }
 
-    // Build WHERE conditions and collect parameters
-    const whereConditions: string[] = []
-    const allParams: unknown[] = []
+    // Build final query parts
+    const finalParts: ReturnType<typeof sql>[] = [query]
+
+    // Build WHERE conditions
+    const whereFragments: ReturnType<typeof sql>[] = []
 
     // Regular WHERE conditions
     if (options.where && Object.keys(options.where).length > 0) {
       const whereFilter = compileFilter(options.where as any)
-      whereConditions.push(whereFilter.text)
-      allParams.push(...whereFilter.values)
+      whereFragments.push(whereFilter)
     }
 
     // Cursor conditions
-    if (options.cursorConditions && options.cursorConditions.sql) {
-      whereConditions.push(options.cursorConditions.sql)
-      allParams.push(...options.cursorConditions.params)
+    if (options.cursorConditions && options.cursorConditions.text) {
+      whereFragments.push(options.cursorConditions)
     }
 
     // Add WHERE clause if needed
-    if (whereConditions.length > 0) {
-      const combinedWhere = whereConditions.join(' AND ')
-      query = sql`${query} WHERE ${sql.raw(combinedWhere)}`
+    if (whereFragments.length > 0) {
+      const whereClause = sql.join(whereFragments, ' AND ')
+      finalParts.push(sql`WHERE ${whereClause}`)
     }
 
     // Add ORDER BY
     if (options.orderBy && options.orderBy.length > 0) {
-      const orderClauses = options.orderBy.map(
-        (order) =>
-          `${sql.ident(`${table}.${order.column}`).text} ${order.direction.toUpperCase()}`,
-      )
-      query = sql`${query} ORDER BY ${sql.raw(orderClauses.join(', '))}`
+      const orderFragments = options.orderBy.map((order) => {
+        const direction = { text: order.direction.toUpperCase(), values: [] }
+        return sql`${sql.ident(`${table}.${order.column}`)} ${direction}`
+      })
+      finalParts.push(sql`ORDER BY ${sql.join(orderFragments, ', ')}`)
     }
 
     // Add LIMIT
     if (options.limit) {
-      query = sql`${query} LIMIT ${options.limit}`
-      allParams.push(options.limit)
+      finalParts.push(sql`LIMIT ${options.limit}`)
     }
 
     // Add OFFSET
     if (options.offset) {
-      query = sql`${query} OFFSET ${options.offset}`
-      allParams.push(options.offset)
+      finalParts.push(sql`OFFSET ${options.offset}`)
     }
 
-    return {
-      sql: query.text,
-      params: allParams,
-    }
+    // If no WHERE conditions, just join all parts
+    return sql.join(finalParts, ' ')
   } catch (error) {
     throw new SqlBuilderError(
       `Failed to build SELECT query: ${error instanceof Error ? error.message : 'Unknown error'}`,
@@ -122,28 +117,38 @@ export function buildSelect(
  */
 function buildJoin(
   baseTable: string,
-  joinName: string,
   joinDef: JoinDef,
-): { sql: string; params: unknown[] } {
+): ReturnType<typeof sql> {
   const { remote, localPk, through } = joinDef
-
-  let joinSql: string
 
   if (through) {
     // Many-to-many join through junction table
-    joinSql = `LEFT JOIN ${sql.ident(through.table).text} ON ${sql.ident(`${baseTable}.${localPk}`).text} = ${sql.ident(`${through.table}.${through.from}`).text} `
-    joinSql += `LEFT JOIN ${sql.ident(remote.table).text} ON ${sql.ident(`${through.table}.${through.to}`).text} = ${sql.ident(`${remote.table}.${remote.pk}`).text}`
+    const throughJoin = sql`LEFT JOIN ${sql.ident(through.table)} ON ${sql.ident(`${baseTable}.${localPk}`)} = ${sql.ident(`${through.table}.${through.from}`)}`
+    const remoteJoin = sql`LEFT JOIN ${sql.ident(remote.table)} ON ${sql.ident(`${through.table}.${through.to}`)} = ${sql.ident(`${remote.table}.${remote.pk}`)}`
+
+    const joinFragments = [throughJoin, remoteJoin]
+
+    // Add WHERE condition for the join if specified
+    if (joinDef.where) {
+      const whereCondition = { text: joinDef.where, values: [] }
+      joinFragments.push(sql`AND ${whereCondition}`)
+    }
+
+    return sql.join(joinFragments, ' ')
   } else {
     // Direct join
-    joinSql = `LEFT JOIN ${sql.ident(remote.table).text} ON ${sql.ident(`${baseTable}.${localPk}`).text} = ${sql.ident(`${remote.table}.${remote.pk}`).text}`
-  }
+    const joinFragments = [
+      sql`LEFT JOIN ${sql.ident(remote.table)} ON ${sql.ident(`${baseTable}.${localPk}`)} = ${sql.ident(`${remote.table}.${remote.pk}`)}`,
+    ]
 
-  // Add WHERE condition for the join if specified
-  if (joinDef.where) {
-    joinSql += ` AND ${joinDef.where}`
-  }
+    // Add WHERE condition for the join if specified
+    if (joinDef.where) {
+      const whereCondition = { text: joinDef.where, values: [] }
+      joinFragments.push(sql`AND ${whereCondition}`)
+    }
 
-  return { sql: joinSql, params: [] }
+    return sql.join(joinFragments, ' ')
+  }
 }
 
 /**
@@ -152,23 +157,20 @@ function buildJoin(
 export function buildInsert(
   table: string,
   data: Record<string, unknown>,
-): { sql: string; params: unknown[] } {
+): ReturnType<typeof sql> {
   try {
     const columns = Object.keys(data)
     const values = Object.values(data)
 
-    // Create placeholder string manually to avoid double parentheses
-    const placeholders = values.map(() => '?').join(', ')
+    // Create individual placeholders for the VALUES clause
+    const placeholderFragments = values.map((value) => sql`${value}`)
 
     const query = sql`
       INSERT INTO ${sql.ident(table)} (${sql.ident(columns)}) 
-      VALUES (${sql.raw(placeholders)})
+      VALUES (${sql.join(placeholderFragments, ', ')})
     `
 
-    return {
-      sql: query.text,
-      params: [...values],
-    }
+    return query
   } catch (error) {
     throw new SqlBuilderError(
       `Failed to build INSERT query: ${error instanceof Error ? error.message : 'Unknown error'}`,
@@ -184,27 +186,23 @@ export function buildUpdate(
   table: string,
   data: Record<string, unknown>,
   where: Record<string, unknown>,
-): { sql: string; params: unknown[] } {
+): ReturnType<typeof sql> {
   try {
-    // Build SET clauses
-    const setClauses = Object.keys(data).map(
-      (column) => `${sql.ident(column).text} = ?`,
+    // Build SET clauses using sql fragments
+    const setFragments = Object.entries(data).map(
+      ([column, value]) => sql`${sql.ident(column)} = ${value}`,
     )
-    const setValues = Object.values(data)
 
     // Build WHERE clause
     const whereFilter = compileFilter(where as any)
 
-    const query = sql`
-      UPDATE ${sql.ident(table)} 
-      SET ${sql.raw(setClauses.join(', '))}
-      WHERE ${sql.raw(whereFilter.text)}
-    `
+    const queryParts = [
+      sql`UPDATE ${sql.ident(table)}`,
+      sql`SET ${sql.join(setFragments, ', ')}`,
+      sql`WHERE ${whereFilter}`,
+    ]
 
-    return {
-      sql: query.text,
-      params: [...setValues, ...whereFilter.values],
-    }
+    return sql.join(queryParts, ' ')
   } catch (error) {
     throw new SqlBuilderError(
       `Failed to build UPDATE query: ${error instanceof Error ? error.message : 'Unknown error'}`,
@@ -219,19 +217,16 @@ export function buildUpdate(
 export function buildDelete(
   table: string,
   where: Record<string, unknown>,
-): { sql: string; params: unknown[] } {
+): ReturnType<typeof sql> {
   try {
     const whereFilter = compileFilter(where as any)
 
-    const query = sql`
-      DELETE FROM ${sql.ident(table)}
-      WHERE ${sql.raw(whereFilter.text)}
-    `
+    const queryParts = [
+      sql`DELETE FROM ${sql.ident(table)}`,
+      sql`WHERE ${whereFilter}`,
+    ]
 
-    return {
-      sql: query.text,
-      params: [...whereFilter.values],
-    }
+    return sql.join(queryParts, ' ')
   } catch (error) {
     throw new SqlBuilderError(
       `Failed to build DELETE query: ${error instanceof Error ? error.message : 'Unknown error'}`,
@@ -246,21 +241,16 @@ export function buildDelete(
 export function buildCount(
   table: string,
   where?: Record<string, unknown>,
-): { sql: string; params: unknown[] } {
+): ReturnType<typeof sql> {
   try {
-    let query = sql`SELECT COUNT(*) as count FROM ${sql.ident(table)}`
-    const allParams: unknown[] = []
+    const queryParts = [sql`SELECT COUNT(*) as count FROM ${sql.ident(table)}`]
 
     if (where && Object.keys(where).length > 0) {
       const whereFilter = compileFilter(where as any)
-      query = sql`${query} WHERE ${sql.raw(whereFilter.text)}`
-      allParams.push(...whereFilter.values)
+      queryParts.push(sql`WHERE ${whereFilter}`)
     }
 
-    return {
-      sql: query.text,
-      params: allParams,
-    }
+    return sql.join(queryParts, ' ')
   } catch (error) {
     throw new SqlBuilderError(
       `Failed to build COUNT query: ${error instanceof Error ? error.message : 'Unknown error'}`,
@@ -281,7 +271,7 @@ export function buildSelectById(
     joins?: Record<string, JoinDef>
     include?: Record<string, boolean>
   } = {},
-): { sql: string; params: unknown[] } {
+): ReturnType<typeof sql> {
   const where: Record<string, unknown> = {}
 
   // Check if there are active JOINs that could cause column ambiguity

@@ -21,159 +21,13 @@ import {
   decodeCursor,
   encodeCursor,
 } from './pagination.js'
-
-// Mock D1Database interface using Bun SQLite
-class MockD1Database {
-  private db: Database
-
-  constructor(db: Database) {
-    this.db = db
-  }
-
-  prepare(query: string) {
-    const stmt = this.db.prepare(query)
-    return {
-      bind: (...values: unknown[]) => {
-        // Return bound statement that mimics D1 API
-        return {
-          first: () => {
-            try {
-              const result = stmt.get(...(values as any))
-              return result || null
-            } catch (error) {
-              console.error('Error in bound first():', error)
-              return null
-            }
-          },
-          all: () => {
-            try {
-              const results = stmt.all(...(values as any))
-              return {
-                success: true,
-                results: results,
-                meta: { duration: 1 },
-              }
-            } catch (error) {
-              console.error('Error in bound all():', error)
-              return {
-                success: false,
-                results: [],
-                meta: { duration: 1 },
-              }
-            }
-          },
-          run: () => {
-            try {
-              const result = stmt.run(...(values as any))
-              return {
-                success: true,
-                meta: {
-                  last_row_id: result.lastInsertRowid || 0,
-                  changes: result.changes || 0,
-                  duration: 1,
-                  size_after: 100,
-                  rows_read: 1,
-                  rows_written: result.changes || 0,
-                  changed_db: result.changes > 0,
-                },
-              }
-            } catch (error) {
-              console.error('Error in bound run():', error)
-              return {
-                success: false,
-                meta: {
-                  last_row_id: 0,
-                  changes: 0,
-                  duration: 1,
-                  size_after: 100,
-                  rows_read: 0,
-                  rows_written: 0,
-                  changed_db: false,
-                },
-              }
-            }
-          },
-        }
-      },
-      first: () => {
-        // For unbounded calls, we need to handle the case where parameters are needed
-        try {
-          const result = stmt.get()
-          return result || null
-        } catch (error) {
-          // If it fails due to missing parameters, return null
-          return null
-        }
-      },
-      all: () => {
-        try {
-          const results = stmt.all()
-          return {
-            success: true,
-            results: results,
-            meta: { duration: 1 },
-          }
-        } catch (error) {
-          // If it fails due to missing parameters, return empty results
-          return {
-            success: false,
-            results: [],
-            meta: { duration: 1 },
-          }
-        }
-      },
-      run: () => {
-        try {
-          const result = stmt.run()
-          return {
-            success: true,
-            meta: {
-              last_row_id: result.lastInsertRowid || 0,
-              changes: result.changes || 0,
-              duration: 1,
-              size_after: 100,
-              rows_read: 1,
-              rows_written: result.changes || 0,
-              changed_db: result.changes > 0,
-            },
-          }
-        } catch (error) {
-          console.error('Error in unbound run():', error)
-          return {
-            success: false,
-            meta: {
-              last_row_id: 0,
-              changes: 0,
-              duration: 1,
-              size_after: 100,
-              rows_read: 0,
-              rows_written: 0,
-              changed_db: false,
-            },
-          }
-        }
-      },
-    }
-  }
-
-  batch(statements: any[]) {
-    return Promise.resolve(statements.map((stmt) => stmt.run()))
-  }
-
-  dump() {
-    return Promise.resolve(new ArrayBuffer(0))
-  }
-
-  exec(query: string) {
-    this.db.exec(query)
-    return Promise.resolve({ count: 0, duration: 1 })
-  }
-}
+import { MockD1Database } from './test-utils/mock-d1.js'
 
 describe('D1 Library - Comprehensive Tests', () => {
   let db: Database
   let mockD1: MockD1Database
   let testService: Service<any, any, any, any, any>
+  let testSecretKey: string
 
   // Test schemas - using snake_case for database consistency
   const UserRowSchema = z.object({
@@ -252,6 +106,9 @@ describe('D1 Library - Comprehensive Tests', () => {
     db = new Database(':memory:')
     mockD1 = new MockD1Database(db)
 
+    // Generate test encryption key
+    testSecretKey = 'MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=' // base64 encoded 32-byte key
+
     // Set up test schema
     db.exec(`
       CREATE TABLE users (
@@ -307,22 +164,22 @@ describe('D1 Library - Comprehensive Tests', () => {
         (2, 'Product manager', 'avatar2.jpg');
     `)
 
-    // Create basic service
+    // Create basic service with encryption keys
     testService = createService({
       table: 'users',
       db: mockD1 as any,
       rowSchema: UserRowSchema,
       createSchema: UserCreateSchema,
       updateSchema: UserUpdateSchema,
+      encryptionKeys: {
+        default: testSecretKey,
+        'user-secrets': testSecretKey,
+      },
     })
-
-    // Set up encryption key for tests (proper 256-bit key)
-    process.env.SECRET_KEY = 'MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=' // base64 encoded 32-byte key
   })
 
   afterEach(() => {
     db.close()
-    delete process.env.SECRET_KEY
   })
 
   describe('Service Creation', () => {
@@ -644,7 +501,11 @@ describe('D1 Library - Comprehensive Tests', () => {
     let keyProvider: DefaultKeyProvider
 
     beforeEach(() => {
-      keyProvider = new DefaultKeyProvider()
+      keyProvider = new DefaultKeyProvider({
+        default: testSecretKey,
+        'user-secrets': testSecretKey,
+        'custom-key': testSecretKey,
+      })
     })
 
     describe('Basic encryption/decryption', () => {
@@ -754,7 +615,7 @@ describe('D1 Library - Comprehensive Tests', () => {
       })
 
       it('should cache keys in DefaultKeyProvider', async () => {
-        const provider = new DefaultKeyProvider()
+        const provider = new DefaultKeyProvider({ 'test-key': testSecretKey })
 
         const key1 = await provider.getKey('test-key')
         const key2 = await provider.getKey('test-key')
@@ -762,11 +623,24 @@ describe('D1 Library - Comprehensive Tests', () => {
         expect(key1).toBe(key2) // Should be same instance (cached)
       })
 
-      it('should throw EncryptionError when SECRET_KEY not set', async () => {
-        delete process.env.SECRET_KEY
+      it('should throw EncryptionError when encryption key not provided', async () => {
         const provider = new DefaultKeyProvider()
 
-        await expect(provider.getKey()).rejects.toThrow(EncryptionError)
+        await expect(provider.getKey('missing-key')).rejects.toThrow(
+          EncryptionError,
+        )
+      })
+
+      it('should fallback to process.env when no keys provided', async () => {
+        // Set environment variable for this test
+        process.env.SECRET_KEY = testSecretKey
+
+        const provider = new DefaultKeyProvider()
+        const key = await provider.getKey('default')
+        expect(key).toBeDefined()
+
+        // Clean up
+        delete process.env.SECRET_KEY
       })
     })
 
@@ -781,6 +655,10 @@ describe('D1 Library - Comprehensive Tests', () => {
           createSchema: UserCreateSchema,
           updateSchema: UserUpdateSchema,
           secrets: userSecrets,
+          encryptionKeys: {
+            default: testSecretKey,
+            'user-secrets': testSecretKey,
+          },
         })
       })
 
@@ -857,6 +735,9 @@ describe('D1 Library - Comprehensive Tests', () => {
         createSchema: UserCreateSchema,
         updateSchema: UserUpdateSchema,
         joins: userJoins,
+        encryptionKeys: {
+          default: testSecretKey,
+        },
       })
     })
 
@@ -930,6 +811,7 @@ describe('D1 Library - Comprehensive Tests', () => {
         rowSchema: UserRowSchema,
         createSchema: UserCreateSchema,
         updateSchema: UserUpdateSchema,
+        encryptionKeys: { default: testSecretKey },
         hooks: {
           list: {
             before: async () => {
@@ -952,6 +834,7 @@ describe('D1 Library - Comprehensive Tests', () => {
         rowSchema: UserRowSchema,
         createSchema: UserCreateSchema,
         updateSchema: UserUpdateSchema,
+        encryptionKeys: { default: testSecretKey },
         hooks: {
           list: {
             after: async () => {
@@ -974,6 +857,7 @@ describe('D1 Library - Comprehensive Tests', () => {
         rowSchema: UserRowSchema,
         createSchema: UserCreateSchema,
         updateSchema: UserUpdateSchema,
+        encryptionKeys: { default: testSecretKey },
         hooks: {
           list: {
             before: [
@@ -1001,6 +885,7 @@ describe('D1 Library - Comprehensive Tests', () => {
         rowSchema: UserRowSchema,
         createSchema: UserCreateSchema,
         updateSchema: UserUpdateSchema,
+        encryptionKeys: { default: testSecretKey },
         hooks: {
           create: {
             before: async () => {
@@ -1018,7 +903,7 @@ describe('D1 Library - Comprehensive Tests', () => {
           {
             name: 'Test',
             email: 'test@test.com',
-            tenantId: 'tenant-1',
+            tenant_id: 'tenant-1',
           },
           { auth: {} },
         ),
@@ -1036,6 +921,7 @@ describe('D1 Library - Comprehensive Tests', () => {
         rowSchema: UserRowSchema,
         createSchema: UserCreateSchema,
         updateSchema: UserUpdateSchema,
+        encryptionKeys: { default: testSecretKey },
         hooks: {
           list: {
             before: async (ctx) => {
@@ -1064,6 +950,7 @@ describe('D1 Library - Comprehensive Tests', () => {
         rowSchema: UserRowSchema,
         createSchema: UserCreateSchema,
         updateSchema: UserUpdateSchema,
+        encryptionKeys: { default: testSecretKey },
         hooks: {
           list: {
             before: async (ctx) => {

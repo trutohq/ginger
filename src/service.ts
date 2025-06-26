@@ -84,7 +84,9 @@ export class Service<
     this.deps = options.deps || {}
     this.primaryKey = options.primaryKey || 'id'
     this.defaultOrderBy = options.defaultOrderBy
-    this.keyProvider = options.keyProvider || new DefaultKeyProvider()
+    this.keyProvider =
+      options.keyProvider ||
+      new DefaultKeyProvider(options.encryptionKeys || {})
   }
 
   /**

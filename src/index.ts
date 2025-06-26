@@ -53,7 +53,7 @@ export type {
   // Helper types
   ServiceRow,
   ServiceUpdate,
-  UpdateParams
+  UpdateParams,
 } from './types.js'
 
 // Error classes
@@ -67,7 +67,7 @@ export {
   NotFoundError,
   ServiceError,
   SqlBuilderError,
-  ValidationError
+  ValidationError,
 } from './errors.js'
 
 // Encryption utilities
@@ -79,7 +79,7 @@ export {
   encryptSecrets,
   generateSecretKey,
   getSecretColumns,
-  getSecretLogicalNames
+  getSecretLogicalNames,
 } from './crypto.js'
 
 // Pagination utilities
@@ -90,7 +90,7 @@ export {
   encodeCursor,
   getDefaultOrderBy,
   reverseOrderBy,
-  validateOrderBy
+  validateOrderBy,
 } from './pagination.js'
 
 // SQL builder utilities
@@ -102,7 +102,7 @@ export {
   buildSelectById,
   buildUpdate,
   escapeColumn,
-  escapeTable
+  escapeTable,
 } from './sql-builder.js'
 
 // Re-export zod v4 for convenience

@@ -320,6 +320,7 @@ export interface ServiceOptions<
   primaryKey?: string | string[]
   defaultOrderBy?: OrderBy
   keyProvider?: KeyProvider
+  encryptionKeys?: Record<string, string>
 }
 
 /**

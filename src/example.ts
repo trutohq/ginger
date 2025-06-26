@@ -70,9 +70,9 @@ const userSecrets = [
 ] as const satisfies readonly SecretFieldDef[]
 
 /**
- * Factory function to create users service with tenant hooks
+ * Factory function to create users service with tenant hooks and encryption keys
  */
-function createUsersService(db: any) {
+function createUsersService(db: any, encryptionKeys: Record<string, string>) {
   return createService({
     table: 'users',
     db,
@@ -83,6 +83,7 @@ function createUsersService(db: any) {
     secrets: userSecrets,
     primaryKey: 'id',
     defaultOrderBy: { column: 'created_at', direction: 'desc' as const },
+    encryptionKeys, // Pass encryption keys directly
     hooks: {
       // Enforce tenant filtering on all operations
       list: {
@@ -127,135 +128,19 @@ function createUsersService(db: any) {
 }
 
 /**
- * Extended users service with custom methods
- */
-class UsersService {
-  private baseService: ReturnType<typeof createUsersService>
-
-  constructor(db: any) {
-    this.baseService = createUsersService(db)
-  }
-
-  // Delegate all base methods
-  async list(...args: Parameters<typeof this.baseService.list>) {
-    return this.baseService.list(...args)
-  }
-
-  async get(...args: Parameters<typeof this.baseService.get>) {
-    return this.baseService.get(...args)
-  }
-
-  async create(...args: Parameters<typeof this.baseService.create>) {
-    return this.baseService.create(...args)
-  }
-
-  async update(...args: Parameters<typeof this.baseService.update>) {
-    return this.baseService.update(...args)
-  }
-
-  async delete(...args: Parameters<typeof this.baseService.delete>) {
-    return this.baseService.delete(...args)
-  }
-
-  async count(...args: Parameters<typeof this.baseService.count>) {
-    return this.baseService.count(...args)
-  }
-
-  async query(...args: Parameters<typeof this.baseService.query>) {
-    return this.baseService.query(...args)
-  }
-  /**
-   * Custom method: Get users with their team memberships
-   */
-  async withMembership(auth: { user?: { id: string; tenantId: string } } = {}) {
-    const ctx = {
-      auth,
-      db: this.db,
-      deps: this.deps,
-      method: 'withMembership',
-      params: { auth },
-    }
-
-    try {
-      await this.runHooks('before', 'withMembership', ctx)
-
-      // List users with teams included
-      const users = await this.list({
-        auth,
-        include: { teams: true },
-        orderBy: [{ column: 'name', direction: 'asc' }],
-      })
-
-      // Transform the data to include membership info
-      const usersWithMembership = users.result.map((user) => ({
-        ...user,
-        membershipCount: Array.isArray(user.teams) ? user.teams.length : 0,
-        isTeamMember: Array.isArray(user.teams) && user.teams.length > 0,
-      }))
-
-      const result = {
-        ...users,
-        result: usersWithMembership,
-      }
-
-      ctx.result = result
-      await this.runHooks('after', 'withMembership', ctx)
-
-      return result
-    } catch (error) {
-      ctx.error = error as Error
-      await this.runHooks('error', 'withMembership', ctx)
-      throw error
-    }
-  }
-
-  /**
-   * Custom method: Get user by API key (encrypted lookup)
-   */
-  async findByApiKey(
-    apiKey: string,
-    auth: { user?: { tenantId: string } } = {},
-  ) {
-    const ctx = {
-      auth,
-      db: this.db,
-      deps: this.deps,
-      method: 'findByApiKey',
-      params: { apiKey, auth },
-    }
-
-    try {
-      await this.runHooks('before', 'findByApiKey', ctx)
-
-      // In practice, you'd need to implement encrypted search
-      // This is a simplified version that lists all users and filters
-      const users = await this.list({
-        auth,
-        includeSecrets: true,
-        limit: 1000, // Adjust based on your needs
-      })
-
-      const user = users.result.find((u) => u.apiKey === apiKey)
-
-      ctx.result = user || null
-      await this.runHooks('after', 'findByApiKey', ctx)
-
-      return user || null
-    } catch (error) {
-      ctx.error = error as Error
-      await this.runHooks('error', 'findByApiKey', ctx)
-      throw error
-    }
-  }
-}
-
-/**
  * Example usage in a Cloudflare Worker
  */
 export default {
   async fetch(request: Request, env: any, ctx: any): Promise<Response> {
-    // Initialize the service with the D1 binding
-    const usersService = new UsersService({
+    // Get encryption keys from Cloudflare environment variables/secrets
+    const encryptionKeys = {
+      default: env.ENCRYPTION_KEY_DEFAULT, // Store as base64 encoded key
+      'user-secrets':
+        env.ENCRYPTION_KEY_USER_SECRETS || env.ENCRYPTION_KEY_DEFAULT,
+    }
+
+    // Initialize the service with the D1 binding and encryption keys
+    const usersService = createService({
       table: 'users',
       db: env.DB, // Cloudflare D1 binding
       rowSchema: UserRowSchema,
@@ -263,6 +148,33 @@ export default {
       updateSchema: UserUpdateSchema,
       joins: userJoins,
       secrets: userSecrets,
+      encryptionKeys, // Pass encryption keys directly
+      hooks: {
+        // Enforce tenant filtering on all operations
+        list: {
+          before: async (ctx: any) => {
+            if (!ctx.auth.user?.tenantId) {
+              throw new Error('User must have a tenant ID')
+            }
+            // Add tenant filter to where clause
+            if (!ctx.params.where) {
+              ctx.params.where = {}
+            }
+            ctx.params.where.tenantId = ctx.auth.user.tenantId
+          },
+        },
+        create: {
+          before: async (ctx: any) => {
+            if (!ctx.auth.user?.tenantId) {
+              throw new Error('User must have a tenant ID')
+            }
+            // Ensure created records belong to the user's tenant
+            ctx.data.tenantId = ctx.auth.user.tenantId
+            ctx.data.createdAt = new Date().toISOString()
+            ctx.data.updatedAt = new Date().toISOString()
+          },
+        },
+      },
     })
 
     try {
@@ -299,28 +211,23 @@ export default {
         orderBy: [{ column: 'created_at', direction: 'desc' }],
       })
 
-      // Example: Get users with membership info
-      const usersWithMembership = await usersService.withMembership({
-        user: {
-          id: 'current-user-id',
-          tenantId: 'tenant-123',
+      // Example: Get a user with secrets included
+      const userWithSecrets = await usersService.get(newUser.id, {
+        auth: {
+          user: {
+            id: 'current-user-id',
+            tenantId: 'tenant-123',
+            roles: ['admin'],
+          },
         },
+        includeSecrets: true, // This will decrypt the API key
       })
-
-      // Example: Find user by API key
-      const userByApiKey = await usersService.findByApiKey(
-        'sk_ex_abcdef1234567890abcdef1234567890',
-        {
-          user: { tenantId: 'tenant-123' },
-        },
-      )
 
       return new Response(
         JSON.stringify({
           newUser,
           users,
-          usersWithMembership,
-          userByApiKey,
+          userWithSecrets,
         }),
         {
           headers: { 'content-type': 'application/json' },
@@ -339,6 +246,29 @@ export default {
     }
   },
 }
+
+/**
+ * Cloudflare Worker Environment Setup:
+ *
+ * 1. Add these environment variables to your Cloudflare Worker:
+ *    - ENCRYPTION_KEY_DEFAULT: A base64-encoded 256-bit encryption key
+ *    - ENCRYPTION_KEY_USER_SECRETS: (Optional) A separate key for user secrets
+ *
+ * 2. Generate encryption keys using the library:
+ *    ```typescript
+ *    import { generateSecretKey } from './crypto.js'
+ *    const key = await generateSecretKey()
+ *    console.log('ENCRYPTION_KEY_DEFAULT=' + key)
+ *    ```
+ *
+ * 3. Bind your D1 database as "DB" in wrangler.toml:
+ *    ```toml
+ *    [[d1_databases]]
+ *    binding = "DB"
+ *    database_name = "your-database"
+ *    database_id = "your-database-id"
+ *    ```
+ */
 
 /**
  * SQL schema for this example:

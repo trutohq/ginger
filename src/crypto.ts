@@ -2,10 +2,23 @@ import { EncryptionError } from './errors.js'
 import type { KeyProvider, SecretFieldDef } from './types.js'
 
 /**
- * Default key provider that reads from environment variable
+ * Default key provider that accepts keys as constructor parameters
  */
 export class DefaultKeyProvider implements KeyProvider {
   private keyCache = new Map<string, CryptoKey>()
+  private keys: Map<string, string>
+
+  constructor(keys: Record<string, string> = {}) {
+    this.keys = new Map(Object.entries(keys))
+    // If no keys provided but a default key exists, use it
+    if (
+      this.keys.size === 0 &&
+      typeof process !== 'undefined' &&
+      process.env?.SECRET_KEY
+    ) {
+      this.keys.set('default', process.env.SECRET_KEY)
+    }
+  }
 
   async getKey(keyId: string = 'default'): Promise<CryptoKey> {
     const cached = this.keyCache.get(keyId)
@@ -13,9 +26,9 @@ export class DefaultKeyProvider implements KeyProvider {
       return cached
     }
 
-    const secretKey = process.env.SECRET_KEY
+    const secretKey = this.keys.get(keyId)
     if (!secretKey) {
-      throw new EncryptionError('SECRET_KEY environment variable not set')
+      throw new EncryptionError(`Encryption key not found for keyId: ${keyId}`)
     }
 
     try {

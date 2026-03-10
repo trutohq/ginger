@@ -30,7 +30,7 @@ import type {
   ComputeJoins,
   CountParams,
   CreateParams,
-  D1Database,
+  Database,
   DeleteParams,
   GetParams,
   HookMap,
@@ -47,7 +47,7 @@ import type {
 } from './types.js'
 
 /**
- * Main service class that provides type-safe data access for Cloudflare D1
+ * Main service class that provides type-safe data access for SQLite databases
  */
 export class Service<
   TRow extends z.ZodTypeAny,
@@ -58,12 +58,12 @@ export class Service<
 > implements BaseService<TRow, TCreate, TUpdate, TJoins, TSecrets>
 {
   public readonly table: string
-  public readonly db: D1Database
+  public readonly db: Database
   public readonly rowSchema: TRow
   public readonly createSchema: TCreate
   public readonly updateSchema: TUpdate
   public readonly joins: TJoins | undefined
-  public readonly secrets: TSecrets
+  public readonly secrets: TSecrets | undefined
   public readonly primaryKey: string | string[]
   public readonly defaultOrderBy: OrderBy | undefined
   public readonly keyProvider: KeyProvider
@@ -80,7 +80,7 @@ export class Service<
     this.createSchema = options.createSchema
     this.updateSchema = options.updateSchema
     this.joins = options.joins
-    this.secrets = options.secrets
+    this.secrets = options.secrets as TSecrets | undefined
     this.hooks = options.hooks || {}
     this.deps = options.deps || {}
     this.primaryKey = options.primaryKey || 'id'
@@ -162,11 +162,11 @@ export class Service<
       const { text: query, values: sqlParams } = buildSelect(this.table, {
         columns,
         where,
-        joins: this.joins,
+        ...(this.joins ? { joins: this.joins } : {}),
         include,
         orderBy,
         limit: actualLimit,
-        cursorConditions,
+        ...(cursorConditions ? { cursorConditions } : {}),
       })
 
       const stmt = this.db.prepare(query)
@@ -262,7 +262,7 @@ export class Service<
         id,
         {
           columns,
-          joins: this.joins,
+          ...(this.joins ? { joins: this.joins } : {}),
           include,
         },
       )
@@ -292,7 +292,7 @@ export class Service<
       }
 
       // Validate row (but preserve join data)
-      const baseRow = this.rowSchema.parse(row) // Validate only base row data
+      const baseRow = this.rowSchema.parse(row) as Record<string, unknown>
       const validatedRow = {
         ...baseRow,
         ...this.extractJoinData(processedRow, include),
@@ -331,11 +331,14 @@ export class Service<
       const { include = {}, includeSecrets = false } = opts
 
       // Validate input data
-      const validatedData = this.createSchema.parse(data)
+      const validatedData = this.createSchema.parse(data) as Record<
+        string,
+        unknown
+      >
 
       // Add timestamp fields
       const now = new Date().toISOString()
-      const dataWithTimestamps = {
+      const dataWithTimestamps: Record<string, unknown> = {
         ...validatedData,
         created_at: now,
         updated_at: now,
@@ -413,10 +416,12 @@ export class Service<
       }
 
       // Validate input data
-      const validatedData = this.updateSchema.partial().parse(data)
+      const validatedData = (this.updateSchema as any)
+        .partial()
+        .parse(data) as Record<string, unknown>
 
       // Add updated timestamp
-      const dataWithTimestamp = {
+      const dataWithTimestamp: Record<string, unknown> = {
         ...validatedData,
         updated_at: new Date().toISOString(),
       }
@@ -713,10 +718,12 @@ export class Service<
       return rows
     }
 
+    const joins = this.joins!
+
     return rows.map((row) => {
       const processedRow = { ...row }
 
-      for (const [joinName, joinDef] of Object.entries(this.joins)) {
+      for (const [joinName, joinDef] of Object.entries(joins)) {
         if (!include[joinName]) continue
 
         const joinAlias = joinDef.remote.alias || joinName
@@ -768,7 +775,7 @@ export class Service<
 
     const joinData: Record<string, unknown> = {}
 
-    for (const [joinName, joinDef] of Object.entries(this.joins)) {
+    for (const joinName of Object.keys(this.joins)) {
       if (include[joinName] && joinName in processedRow) {
         joinData[joinName] = processedRow[joinName]
       }

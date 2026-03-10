@@ -1,24 +1,26 @@
 import type { z } from 'zod/v4'
 
 /**
- * Cloudflare D1 Database interface
+ * Generic SQLite database interface.
+ * Compatible with Cloudflare D1, Bun SQLite (via adapter), and
+ * Durable Object SqlStorage (via adapter).
  */
-export interface D1Database {
-  prepare(query: string): D1PreparedStatement
+export interface Database {
+  prepare(query: string): PreparedStatement
   dump(): Promise<ArrayBuffer>
-  batch<T = unknown>(statements: D1PreparedStatement[]): Promise<D1Result<T>[]>
-  exec(query: string): Promise<D1ExecResult>
+  batch<T = unknown>(statements: PreparedStatement[]): Promise<QueryResult<T>[]>
+  exec(query: string): Promise<ExecResult>
 }
 
-export interface D1PreparedStatement {
-  bind(...values: unknown[]): D1PreparedStatement
+export interface PreparedStatement {
+  bind(...values: unknown[]): PreparedStatement
   first<T = unknown>(): Promise<T | null>
-  run(): Promise<D1Result>
-  all<T = unknown>(): Promise<D1Result<T[]>>
+  run(): Promise<QueryResult>
+  all<T = unknown>(): Promise<QueryResult<T[]>>
   raw<T = unknown>(): Promise<T[]>
 }
 
-export interface D1Result<T = unknown> {
+export interface QueryResult<T = unknown> {
   results?: T
   success: boolean
   meta: {
@@ -32,7 +34,7 @@ export interface D1Result<T = unknown> {
   }
 }
 
-export interface D1ExecResult {
+export interface ExecResult {
   count: number
   duration: number
 }
@@ -53,12 +55,13 @@ export interface AuthContext {
  */
 export interface BaseCtx {
   auth: AuthContext
-  db: D1Database
+  db: Database
   deps: ServiceDeps
   method: MethodName
   params?: unknown
   data?: unknown
   result?: unknown
+  error?: Error | undefined
 }
 
 /**
@@ -137,8 +140,8 @@ export interface ListParams {
  */
 export interface ListResult<T> {
   result: T[]
-  nextCursor?: string
-  prevCursor?: string
+  nextCursor?: string | undefined
+  prevCursor?: string | undefined
 }
 
 /**
@@ -252,7 +255,7 @@ export interface BaseService<
   TCreate extends z.ZodTypeAny,
   TUpdate extends z.ZodTypeAny,
   TJoins extends Record<string, JoinDef>,
-  TSecrets extends readonly SecretFieldDef[] | undefined,
+  _TSecrets extends readonly SecretFieldDef[] | undefined,
 > {
   list(
     params?: ListParams & MethodOptions,
@@ -308,7 +311,7 @@ export interface ServiceOptions<
   >,
 > {
   table: string
-  db: D1Database
+  db: Database
   builder?: any // SqliteBuilder from @truto/sqlite-builder
   rowSchema: TRow
   createSchema: TCreate

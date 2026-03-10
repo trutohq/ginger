@@ -1,18 +1,32 @@
 {
-  "name": "my-typescript-library",
-  "version": "0.1.0",
-  "description": "A TypeScript library starter template",
-  "keywords": [],
-  "homepage": "https://github.com/username/my-typescript-library#readme",
+  "name": "ginger",
+  "version": "1.0.0",
+  "description": "A type-safe SQLite data access layer for Cloudflare D1, Bun SQLite, and Durable Objects with cursor pagination, joins, AES-256-GCM encryption, and a Feathers.js-inspired hook system",
+  "keywords": [
+    "cloudflare",
+    "d1",
+    "sqlite",
+    "bun",
+    "durable-objects",
+    "typescript",
+    "orm",
+    "data-access",
+    "pagination",
+    "encryption",
+    "hooks",
+    "zod",
+    "workers"
+  ],
+  "homepage": "https://github.com/trutohq/ginger#readme",
   "bugs": {
-    "url": "https://github.com/username/my-typescript-library/issues"
+    "url": "https://github.com/trutohq/ginger/issues"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/username/my-typescript-library.git"
+    "url": "https://github.com/trutohq/ginger.git"
   },
   "license": "MIT",
-  "author": "Your Name <your.email@example.com>",
+  "author": "Roopendra <roopendra@truto.one>",
   "type": "module",
   "exports": {
     ".": {
@@ -28,14 +42,14 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "bun build src/index.ts --outdir dist --sourcemap=linked && tsc --emitDeclarationOnly",
-    "build:declaration": "tsc --emitDeclarationOnly",
-    "dev": "vitest --watch",
+    "build": "rm -rf dist && tsc",
+    "dev": "bun test --watch",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint",
     "lint:fix": "eslint --fix",
     "prepublishOnly": "bun run typecheck && bun run lint && bun test && bun run build",
+    "test": "bun test",
     "typecheck": "tsc --noEmit"
   },
   "lint-staged": {

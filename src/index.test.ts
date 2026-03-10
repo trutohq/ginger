@@ -1,6 +1,7 @@
-import { Database } from 'bun:sqlite'
+import { Database as BunDatabase } from 'bun:sqlite'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { z } from 'zod/v4'
+import { fromBunSqlite } from './adapters/bun-sqlite.js'
 import {
   decrypt,
   decryptSecrets,
@@ -21,11 +22,11 @@ import {
   decodeCursor,
   encodeCursor,
 } from './pagination.js'
-import { MockD1Database } from './test-utils/mock-d1.js'
+import type { Database } from './types.js'
 
-describe('D1 Library - Comprehensive Tests', () => {
+describe('Ginger Library - Comprehensive Tests', () => {
+  let bunDb: BunDatabase
   let db: Database
-  let mockD1: MockD1Database
   let testService: Service<any, any, any, any, any>
   let testSecretKey: string
 
@@ -102,15 +103,15 @@ describe('D1 Library - Comprehensive Tests', () => {
   ] as const
 
   beforeEach(() => {
-    // Create in-memory SQLite database
-    db = new Database(':memory:')
-    mockD1 = new MockD1Database(db)
+    // Create in-memory SQLite database and wrap with adapter
+    bunDb = new BunDatabase(':memory:')
+    db = fromBunSqlite(bunDb)
 
     // Generate test encryption key
     testSecretKey = 'MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=' // base64 encoded 32-byte key
 
     // Set up test schema
-    db.exec(`
+    bunDb.exec(`
       CREATE TABLE users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
@@ -144,7 +145,7 @@ describe('D1 Library - Comprehensive Tests', () => {
     `)
 
     // Insert test data
-    db.exec(`
+    bunDb.exec(`
       INSERT INTO teams (id, name, description) VALUES 
         (1, 'Team Alpha', 'First team'),
         (2, 'Team Beta', 'Second team');
@@ -167,7 +168,7 @@ describe('D1 Library - Comprehensive Tests', () => {
     // Create basic service with encryption keys
     testService = createService({
       table: 'users',
-      db: mockD1 as any,
+      db,
       rowSchema: UserRowSchema,
       createSchema: UserCreateSchema,
       updateSchema: UserUpdateSchema,
@@ -179,7 +180,7 @@ describe('D1 Library - Comprehensive Tests', () => {
   })
 
   afterEach(() => {
-    db.close()
+    bunDb.close()
   })
 
   describe('Service Creation', () => {
@@ -192,7 +193,7 @@ describe('D1 Library - Comprehensive Tests', () => {
     it('should create a service with custom primary key', () => {
       const service = createService({
         table: 'users',
-        db: mockD1 as any,
+        db,
         rowSchema: UserRowSchema,
         createSchema: UserCreateSchema,
         updateSchema: UserUpdateSchema,
@@ -204,7 +205,7 @@ describe('D1 Library - Comprehensive Tests', () => {
     it('should create a service with composite primary key', () => {
       const service = createService({
         table: 'user_teams',
-        db: mockD1 as any,
+        db,
         rowSchema: z.object({ userId: z.number(), teamId: z.number() }),
         createSchema: z.object({ userId: z.number(), teamId: z.number() }),
         updateSchema: z.object({}),
@@ -216,7 +217,7 @@ describe('D1 Library - Comprehensive Tests', () => {
     it('should create a service with joins configuration', () => {
       const serviceWithJoins = createService({
         table: 'users',
-        db: mockD1 as any,
+        db,
         rowSchema: UserRowSchema,
         createSchema: UserCreateSchema,
         updateSchema: UserUpdateSchema,
@@ -228,7 +229,7 @@ describe('D1 Library - Comprehensive Tests', () => {
     it('should create a service with secrets configuration', () => {
       const serviceWithSecrets = createService({
         table: 'users',
-        db: mockD1 as any,
+        db,
         rowSchema: UserRowSchema,
         createSchema: UserCreateSchema,
         updateSchema: UserUpdateSchema,
@@ -243,20 +244,59 @@ describe('D1 Library - Comprehensive Tests', () => {
       it('should list all records', async () => {
         const result = await testService.list({ auth: {} })
 
-        expect(result.result).toHaveLength(3)
-        expect(result.result[0]).toMatchObject({
-          id: 1,
-          name: 'John Doe',
-          email: 'john@test.com',
-          tenant_id: 'tenant-1',
-        })
+        expect(result.result).toEqual([
+          {
+            id: 1,
+            name: 'John Doe',
+            email: 'john@test.com',
+            tenant_id: 'tenant-1',
+            created_at: '2024-01-01T00:00:00Z',
+            updated_at: null,
+          },
+          {
+            id: 2,
+            name: 'Jane Smith',
+            email: 'jane@test.com',
+            tenant_id: 'tenant-1',
+            created_at: '2024-01-02T00:00:00Z',
+            updated_at: null,
+          },
+          {
+            id: 3,
+            name: 'Bob Wilson',
+            email: 'bob@test.com',
+            tenant_id: 'tenant-2',
+            created_at: '2024-01-03T00:00:00Z',
+            updated_at: null,
+          },
+        ])
+        expect(result.nextCursor).toBeUndefined()
+        expect(result.prevCursor).toBeUndefined()
       })
 
       it('should support pagination with limit', async () => {
         const result = await testService.list({ auth: {}, limit: 2 })
 
-        expect(result.result).toHaveLength(2)
+        expect(result.result).toEqual([
+          {
+            id: 1,
+            name: 'John Doe',
+            email: 'john@test.com',
+            tenant_id: 'tenant-1',
+            created_at: '2024-01-01T00:00:00Z',
+            updated_at: null,
+          },
+          {
+            id: 2,
+            name: 'Jane Smith',
+            email: 'jane@test.com',
+            tenant_id: 'tenant-1',
+            created_at: '2024-01-02T00:00:00Z',
+            updated_at: null,
+          },
+        ])
         expect(result.nextCursor).toBeDefined()
+        expect(result.prevCursor).toBeUndefined()
       })
 
       it('should support filtering with where clause', async () => {
@@ -265,10 +305,26 @@ describe('D1 Library - Comprehensive Tests', () => {
           where: { tenant_id: 'tenant-1' },
         })
 
-        expect(result.result).toHaveLength(2)
-        expect(
-          result.result.every((user) => user.tenant_id === 'tenant-1'),
-        ).toBe(true)
+        expect(result.result).toEqual([
+          {
+            id: 1,
+            name: 'John Doe',
+            email: 'john@test.com',
+            tenant_id: 'tenant-1',
+            created_at: '2024-01-01T00:00:00Z',
+            updated_at: null,
+          },
+          {
+            id: 2,
+            name: 'Jane Smith',
+            email: 'jane@test.com',
+            tenant_id: 'tenant-1',
+            created_at: '2024-01-02T00:00:00Z',
+            updated_at: null,
+          },
+        ])
+        expect(result.nextCursor).toBeUndefined()
+        expect(result.prevCursor).toBeUndefined()
       })
 
       it('should support custom ordering', async () => {
@@ -277,8 +333,32 @@ describe('D1 Library - Comprehensive Tests', () => {
           orderBy: [{ column: 'name', direction: 'desc' }],
         })
 
-        expect(result.result[0]?.name).toBe('John Doe')
-        expect(result.result[1]?.name).toBe('Jane Smith')
+        expect(result.result).toEqual([
+          {
+            id: 1,
+            name: 'John Doe',
+            email: 'john@test.com',
+            tenant_id: 'tenant-1',
+            created_at: '2024-01-01T00:00:00Z',
+            updated_at: null,
+          },
+          {
+            id: 2,
+            name: 'Jane Smith',
+            email: 'jane@test.com',
+            tenant_id: 'tenant-1',
+            created_at: '2024-01-02T00:00:00Z',
+            updated_at: null,
+          },
+          {
+            id: 3,
+            name: 'Bob Wilson',
+            email: 'bob@test.com',
+            tenant_id: 'tenant-2',
+            created_at: '2024-01-03T00:00:00Z',
+            updated_at: null,
+          },
+        ])
       })
 
       it('should validate limit parameter', async () => {
@@ -292,11 +372,13 @@ describe('D1 Library - Comprehensive Tests', () => {
       it('should get a record by ID', async () => {
         const result = await testService.get(1, { auth: {} })
 
-        expect(result).toMatchObject({
+        expect(result).toEqual({
           id: 1,
           name: 'John Doe',
           email: 'john@test.com',
           tenant_id: 'tenant-1',
+          created_at: '2024-01-01T00:00:00Z',
+          updated_at: null,
         })
       })
 
@@ -317,12 +399,18 @@ describe('D1 Library - Comprehensive Tests', () => {
           { auth: {} },
         )
 
-        expect(result).toMatchObject({
+        expect(result).toEqual({
+          id: 4, // Should be the next auto-increment ID
           name: 'Alice Johnson',
           email: 'alice@test.com',
           tenant_id: 'tenant-1',
+          created_at: expect.stringMatching(
+            /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+          ),
+          updated_at: expect.stringMatching(
+            /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+          ),
         })
-        expect(result.id).toBeGreaterThan(0)
       })
 
       it('should validate create data', async () => {
@@ -362,8 +450,16 @@ describe('D1 Library - Comprehensive Tests', () => {
           { auth: {} },
         )
 
-        expect(result?.name).toBe('John Updated')
-        expect(result?.email).toBe('john@test.com') // Unchanged
+        expect(result).toEqual({
+          id: 1,
+          name: 'John Updated',
+          email: 'john@test.com',
+          tenant_id: 'tenant-1',
+          created_at: '2024-01-01T00:00:00Z',
+          updated_at: expect.stringMatching(
+            /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+          ),
+        })
       })
 
       it('should throw NotFoundError for non-existent record', async () => {
@@ -414,13 +510,31 @@ describe('D1 Library - Comprehensive Tests', () => {
     describe('query()', () => {
       it('should execute custom SQL', async () => {
         const result = await testService.query(
-          'SELECT * FROM users WHERE tenant_id = ?',
+          'SELECT * FROM users WHERE tenant_id = ? ORDER BY id',
           { auth: {} },
           'tenant-1',
         )
 
-        expect(Array.isArray(result)).toBe(true)
-        expect(result.length).toBeGreaterThan(0)
+        expect(result).toEqual([
+          {
+            id: 1,
+            name: 'John Doe',
+            email: 'john@test.com',
+            api_key_encrypted: null,
+            tenant_id: 'tenant-1',
+            created_at: '2024-01-01T00:00:00Z',
+            updated_at: null,
+          },
+          {
+            id: 2,
+            name: 'Jane Smith',
+            email: 'jane@test.com',
+            api_key_encrypted: null,
+            tenant_id: 'tenant-1',
+            created_at: '2024-01-02T00:00:00Z',
+            updated_at: null,
+          },
+        ])
       })
     })
   })
@@ -468,8 +582,26 @@ describe('D1 Library - Comprehensive Tests', () => {
       it('should paginate forward correctly', async () => {
         // Get first page
         const page1 = await testService.list({ auth: {}, limit: 2 })
-        expect(page1.result).toHaveLength(2)
+        expect(page1.result).toEqual([
+          {
+            id: 1,
+            name: 'John Doe',
+            email: 'john@test.com',
+            tenant_id: 'tenant-1',
+            created_at: '2024-01-01T00:00:00Z',
+            updated_at: null,
+          },
+          {
+            id: 2,
+            name: 'Jane Smith',
+            email: 'jane@test.com',
+            tenant_id: 'tenant-1',
+            created_at: '2024-01-02T00:00:00Z',
+            updated_at: null,
+          },
+        ])
         expect(page1.nextCursor).toBeDefined()
+        expect(page1.prevCursor).toBeUndefined()
 
         // Get second page
         if (page1.nextCursor) {
@@ -478,7 +610,17 @@ describe('D1 Library - Comprehensive Tests', () => {
             cursor: page1.nextCursor,
             limit: 2,
           })
-          expect(page2.result).toHaveLength(1) // Only 1 remaining
+          expect(page2.result).toEqual([
+            {
+              id: 3,
+              name: 'Bob Wilson',
+              email: 'bob@test.com',
+              tenant_id: 'tenant-2',
+              created_at: '2024-01-03T00:00:00Z',
+              updated_at: null,
+            },
+          ])
+          expect(page2.nextCursor).toBeUndefined()
           expect(page2.prevCursor).toBeDefined()
         }
       })
@@ -491,7 +633,7 @@ describe('D1 Library - Comprehensive Tests', () => {
         }
 
         const conditions = buildCursorConditions(token, 'users')
-        expect(conditions.text).toBeTruthy()
+        expect(conditions.text).toBe('"users"."id" > ?')
         expect(conditions.values).toEqual([2])
       })
     })
@@ -568,9 +710,18 @@ describe('D1 Library - Comprehensive Tests', () => {
 
         expect(encrypted.name).toBe('John')
         expect(encrypted.email).toBe('john@test.com')
-        expect(encrypted.api_key_encrypted).toBeDefined()
         expect(typeof encrypted.api_key_encrypted).toBe('string')
         expect(encrypted.api_key_encrypted).not.toBe('sk_ex_secret123') // Should be encrypted
+        expect(encrypted.api_key_encrypted).toMatch(
+          /^[A-Za-z0-9+/]+=*:[A-Za-z0-9+/]+=*:[A-Za-z0-9+/]+=*$/,
+        )
+
+        // Verify it can be decrypted back to original
+        const decrypted = await decrypt(
+          encrypted.api_key_encrypted as string,
+          keyProvider,
+        )
+        expect(decrypted).toBe('sk_ex_secret123')
       })
 
       it('should decrypt secrets in data objects', async () => {
@@ -583,19 +734,21 @@ describe('D1 Library - Comprehensive Tests', () => {
 
         const decrypted = await decryptSecrets(data, userSecrets, keyProvider)
 
-        expect(decrypted.name).toBe('John')
-        expect(decrypted.email).toBe('john@test.com')
-        expect(decrypted.api_key_encrypted).toBe('sk_ex_secret123')
+        expect(decrypted).toEqual({
+          name: 'John',
+          api_key_encrypted: 'sk_ex_secret123',
+          email: 'john@test.com',
+        })
       })
 
       it('should handle missing secret fields gracefully', async () => {
         const data = { name: 'John', email: 'john@test.com' }
 
         const encrypted = await encryptSecrets(data, userSecrets, keyProvider)
-        expect(encrypted).toEqual(data)
+        expect(encrypted).toEqual({ name: 'John', email: 'john@test.com' })
 
         const decrypted = await decryptSecrets(data, userSecrets, keyProvider)
-        expect(decrypted).toEqual(data)
+        expect(decrypted).toEqual({ name: 'John', email: 'john@test.com' })
       })
 
       it('should throw EncryptionError for non-string secret values', async () => {
@@ -611,7 +764,8 @@ describe('D1 Library - Comprehensive Tests', () => {
       it('should generate valid secret keys', async () => {
         const key = await generateSecretKey()
         expect(typeof key).toBe('string')
-        expect(key.length).toBeGreaterThan(40) // Base64 encoded 256-bit key
+        expect(key).toMatch(/^[A-Za-z0-9+/]+=*$/) // Valid base64
+        expect(atob(key)).toHaveLength(32) // 256-bit key when decoded
       })
 
       it('should cache keys in DefaultKeyProvider', async () => {
@@ -621,6 +775,8 @@ describe('D1 Library - Comprehensive Tests', () => {
         const key2 = await provider.getKey('test-key')
 
         expect(key1).toBe(key2) // Should be same instance (cached)
+        expect(key1).toBeInstanceOf(CryptoKey)
+        expect(key1.type).toBe('secret')
       })
 
       it('should throw EncryptionError when encryption key not provided', async () => {
@@ -637,7 +793,8 @@ describe('D1 Library - Comprehensive Tests', () => {
 
         const provider = new DefaultKeyProvider()
         const key = await provider.getKey('default')
-        expect(key).toBeDefined()
+        expect(key).toBeInstanceOf(CryptoKey)
+        expect(key.type).toBe('secret')
 
         // Clean up
         delete process.env.SECRET_KEY
@@ -650,7 +807,7 @@ describe('D1 Library - Comprehensive Tests', () => {
       beforeEach(() => {
         serviceWithSecrets = createService({
           table: 'users',
-          db: mockD1 as any,
+          db,
           rowSchema: UserRowSchema,
           createSchema: UserCreateSchema,
           updateSchema: UserUpdateSchema,
@@ -673,12 +830,28 @@ describe('D1 Library - Comprehensive Tests', () => {
           { auth: {} },
         )
 
+        expect(user).toEqual({
+          id: 4, // Should be next auto-increment
+          name: 'Secret User',
+          email: 'secret@test.com',
+          tenant_id: 'tenant-1',
+          created_at: expect.stringMatching(
+            /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+          ),
+          updated_at: expect.stringMatching(
+            /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+          ),
+        })
+
         // API key should be encrypted in database
-        const rawResult = db
+        const rawResult = bunDb
           .prepare('SELECT * FROM users WHERE id = ?')
           .get(user.id) as any
         expect(rawResult.api_key_encrypted).toBeDefined()
         expect(rawResult.api_key_encrypted).not.toBe('sk_ex_secret123')
+        expect(rawResult.api_key_encrypted).toMatch(
+          /^[A-Za-z0-9+/]+=*:[A-Za-z0-9+/]+=*:[A-Za-z0-9+/]+=*$/,
+        )
       })
 
       it('should decrypt secrets when includeSecrets=true', async () => {
@@ -699,7 +872,19 @@ describe('D1 Library - Comprehensive Tests', () => {
           includeSecrets: true,
         })
 
-        expect(withSecrets?.api_key_encrypted).toBe('sk_ex_secret123')
+        expect(withSecrets).toEqual({
+          id: created.id,
+          name: 'Secret User',
+          email: 'secret@test.com',
+          api_key_encrypted: 'sk_ex_secret123',
+          tenant_id: 'tenant-1',
+          created_at: expect.stringMatching(
+            /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+          ),
+          updated_at: expect.stringMatching(
+            /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+          ),
+        })
       })
 
       it('should not include secrets when includeSecrets=false', async () => {
@@ -719,6 +904,18 @@ describe('D1 Library - Comprehensive Tests', () => {
           auth: {},
         })
 
+        expect(withoutSecrets).toEqual({
+          id: created.id,
+          name: 'Secret User',
+          email: 'secret2@test.com',
+          tenant_id: 'tenant-1',
+          created_at: expect.stringMatching(
+            /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+          ),
+          updated_at: expect.stringMatching(
+            /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+          ),
+        })
         expect(withoutSecrets?.api_key_encrypted).toBeUndefined()
       })
     })
@@ -730,7 +927,7 @@ describe('D1 Library - Comprehensive Tests', () => {
     beforeEach(() => {
       serviceWithJoins = createService({
         table: 'users',
-        db: mockD1 as any,
+        db,
         rowSchema: UserRowSchema,
         createSchema: UserCreateSchema,
         updateSchema: UserUpdateSchema,
@@ -747,10 +944,17 @@ describe('D1 Library - Comprehensive Tests', () => {
         include: { profile: true },
       })
 
-      expect(user?.profile).toBeDefined()
-      expect(user?.profile).toMatchObject({
-        bio: 'Software engineer',
-        avatar: 'avatar1.jpg',
+      expect(user).toEqual({
+        id: 1,
+        name: 'John Doe',
+        email: 'john@test.com',
+        tenant_id: 'tenant-1',
+        created_at: '2024-01-01T00:00:00Z',
+        updated_at: null,
+        profile: {
+          bio: 'Software engineer',
+          avatar: 'avatar1.jpg',
+        },
       })
     })
 
@@ -760,14 +964,39 @@ describe('D1 Library - Comprehensive Tests', () => {
         include: { teams: true },
       })
 
-      expect(user?.teams).toBeDefined()
-      expect(Array.isArray(user?.teams)).toBe(true)
-      expect(user?.teams).toHaveLength(2)
+      expect(user).toEqual({
+        id: 2,
+        name: 'Jane Smith',
+        email: 'jane@test.com',
+        tenant_id: 'tenant-1',
+        created_at: '2024-01-02T00:00:00Z',
+        updated_at: null,
+        teams: [
+          {
+            id: 1,
+            name: 'Team Alpha',
+            description: 'First team',
+          },
+          {
+            id: 2,
+            name: 'Team Beta',
+            description: 'Second team',
+          },
+        ],
+      })
     })
 
     it('should not include joins when not requested', async () => {
       const user = await serviceWithJoins.get(1, { auth: {} })
 
+      expect(user).toEqual({
+        id: 1,
+        name: 'John Doe',
+        email: 'john@test.com',
+        tenant_id: 'tenant-1',
+        created_at: '2024-01-01T00:00:00Z',
+        updated_at: null,
+      })
       expect(user?.profile).toBeUndefined()
       expect(user?.teams).toBeUndefined()
     })
@@ -778,8 +1007,25 @@ describe('D1 Library - Comprehensive Tests', () => {
         include: { profile: true, teams: true },
       })
 
-      expect(user?.profile).toBeDefined()
-      expect(user?.teams).toBeDefined()
+      expect(user).toEqual({
+        id: 1,
+        name: 'John Doe',
+        email: 'john@test.com',
+        tenant_id: 'tenant-1',
+        created_at: '2024-01-01T00:00:00Z',
+        updated_at: null,
+        profile: {
+          bio: 'Software engineer',
+          avatar: 'avatar1.jpg',
+        },
+        teams: [
+          {
+            id: 1,
+            name: 'Team Alpha',
+            description: 'First team',
+          },
+        ],
+      })
     })
 
     it('should return null for one-to-one joins with no data', async () => {
@@ -788,7 +1034,15 @@ describe('D1 Library - Comprehensive Tests', () => {
         include: { profile: true },
       })
 
-      expect(user?.profile).toBeNull()
+      expect(user).toEqual({
+        id: 3,
+        name: 'Bob Wilson',
+        email: 'bob@test.com',
+        tenant_id: 'tenant-2',
+        created_at: '2024-01-03T00:00:00Z',
+        updated_at: null,
+        profile: null,
+      })
     })
 
     it('should return empty array for one-to-many joins with no data', async () => {
@@ -797,7 +1051,15 @@ describe('D1 Library - Comprehensive Tests', () => {
         include: { teams: true },
       })
 
-      expect(user?.teams).toEqual([])
+      expect(user).toEqual({
+        id: 3,
+        name: 'Bob Wilson',
+        email: 'bob@test.com',
+        tenant_id: 'tenant-2',
+        created_at: '2024-01-03T00:00:00Z',
+        updated_at: null,
+        teams: [],
+      })
     })
   })
 
@@ -807,7 +1069,7 @@ describe('D1 Library - Comprehensive Tests', () => {
 
       const serviceWithHooks = createService({
         table: 'users',
-        db: mockD1 as any,
+        db,
         rowSchema: UserRowSchema,
         createSchema: UserCreateSchema,
         updateSchema: UserUpdateSchema,
@@ -821,8 +1083,9 @@ describe('D1 Library - Comprehensive Tests', () => {
         },
       })
 
-      await serviceWithHooks.list({ auth: {} })
-      expect(hookCalls).toContain('before-list')
+      const result = await serviceWithHooks.list({ auth: {} })
+      expect(hookCalls).toEqual(['before-list'])
+      expect(result.result).toHaveLength(3) // Verify the operation completed
     })
 
     it('should execute after hooks', async () => {
@@ -830,7 +1093,7 @@ describe('D1 Library - Comprehensive Tests', () => {
 
       const serviceWithHooks = createService({
         table: 'users',
-        db: mockD1 as any,
+        db,
         rowSchema: UserRowSchema,
         createSchema: UserCreateSchema,
         updateSchema: UserUpdateSchema,
@@ -844,8 +1107,9 @@ describe('D1 Library - Comprehensive Tests', () => {
         },
       })
 
-      await serviceWithHooks.list({ auth: {} })
-      expect(hookCalls).toContain('after-list')
+      const result = await serviceWithHooks.list({ auth: {} })
+      expect(hookCalls).toEqual(['after-list'])
+      expect(result.result).toHaveLength(3) // Verify the operation completed
     })
 
     it('should execute multiple hooks in order', async () => {
@@ -853,7 +1117,7 @@ describe('D1 Library - Comprehensive Tests', () => {
 
       const serviceWithHooks = createService({
         table: 'users',
-        db: mockD1 as any,
+        db,
         rowSchema: UserRowSchema,
         createSchema: UserCreateSchema,
         updateSchema: UserUpdateSchema,
@@ -872,8 +1136,9 @@ describe('D1 Library - Comprehensive Tests', () => {
         },
       })
 
-      await serviceWithHooks.list({ auth: {} })
+      const result = await serviceWithHooks.list({ auth: {} })
       expect(hookCalls).toEqual(['hook-1', 'hook-2'])
+      expect(result.result).toHaveLength(3) // Verify the operation completed
     })
 
     it('should execute error hooks when operations fail', async () => {
@@ -881,7 +1146,7 @@ describe('D1 Library - Comprehensive Tests', () => {
 
       const serviceWithHooks = createService({
         table: 'users',
-        db: mockD1 as any,
+        db,
         rowSchema: UserRowSchema,
         createSchema: UserCreateSchema,
         updateSchema: UserUpdateSchema,
@@ -907,9 +1172,9 @@ describe('D1 Library - Comprehensive Tests', () => {
           },
           { auth: {} },
         ),
-      ).rejects.toThrow()
+      ).rejects.toThrow('Simulated error')
 
-      expect(hookCalls).toContain('error-hook')
+      expect(hookCalls).toEqual(['error-hook'])
     })
 
     it('should provide correct context to hooks', async () => {
@@ -917,7 +1182,7 @@ describe('D1 Library - Comprehensive Tests', () => {
 
       const serviceWithHooks = createService({
         table: 'users',
-        db: mockD1 as any,
+        db,
         rowSchema: UserRowSchema,
         createSchema: UserCreateSchema,
         updateSchema: UserUpdateSchema,
@@ -935,18 +1200,19 @@ describe('D1 Library - Comprehensive Tests', () => {
         auth: { user: { id: 'test-user', roles: ['admin'] } },
       })
 
-      expect(capturedContext).toMatchObject({
-        auth: { user: { id: 'test-user', roles: ['admin'] } },
-        method: 'list',
+      expect(capturedContext.auth).toEqual({
+        user: { id: 'test-user', roles: ['admin'] },
       })
-      expect(capturedContext.db).toBeDefined()
+      expect(capturedContext.method).toBe('list')
+      expect(capturedContext.db).toBe(db)
       expect(capturedContext.deps).toBeDefined()
+      expect(typeof capturedContext.deps).toBe('object')
     })
 
     it('should allow hooks to modify context', async () => {
       const serviceWithHooks = createService({
         table: 'users',
-        db: mockD1 as any,
+        db,
         rowSchema: UserRowSchema,
         createSchema: UserCreateSchema,
         updateSchema: UserUpdateSchema,
@@ -967,9 +1233,24 @@ describe('D1 Library - Comprehensive Tests', () => {
       const result = await serviceWithHooks.list({ auth: {} })
 
       // Should only return users from tenant-1
-      expect(result.result.every((user) => user.tenant_id === 'tenant-1')).toBe(
-        true,
-      )
+      expect(result.result).toEqual([
+        {
+          id: 1,
+          name: 'John Doe',
+          email: 'john@test.com',
+          tenant_id: 'tenant-1',
+          created_at: '2024-01-01T00:00:00Z',
+          updated_at: null,
+        },
+        {
+          id: 2,
+          name: 'Jane Smith',
+          email: 'jane@test.com',
+          tenant_id: 'tenant-1',
+          created_at: '2024-01-02T00:00:00Z',
+          updated_at: null,
+        },
+      ])
     })
   })
 
@@ -1014,7 +1295,7 @@ describe('D1 Library - Comprehensive Tests', () => {
   describe('Performance and Edge Cases', () => {
     it('should handle large result sets efficiently', async () => {
       // Insert many test records
-      const stmt = db.prepare(`
+      const stmt = bunDb.prepare(`
         INSERT INTO users (name, email, tenant_id, created_at) 
         VALUES (?, ?, ?, ?)
       `)
@@ -1036,6 +1317,25 @@ describe('D1 Library - Comprehensive Tests', () => {
 
       expect(result.result).toHaveLength(50)
       expect(result.nextCursor).toBeDefined()
+      expect(result.prevCursor).toBeUndefined()
+
+      // Verify first few records have expected structure
+      expect(result.result[0]).toEqual({
+        id: 4, // Should start after existing test data
+        name: 'User 0',
+        email: 'user0@test.com',
+        tenant_id: 'tenant-test',
+        created_at: '2024-01-01T00:00:00Z',
+        updated_at: null,
+      })
+      expect(result.result[1]).toEqual({
+        id: 5,
+        name: 'User 1',
+        email: 'user1@test.com',
+        tenant_id: 'tenant-test',
+        created_at: '2024-01-01T00:00:00Z',
+        updated_at: null,
+      })
     })
 
     it('should handle empty result sets', async () => {
@@ -1044,9 +1344,11 @@ describe('D1 Library - Comprehensive Tests', () => {
         where: { tenant_id: 'non-existent' },
       })
 
-      expect(result.result).toHaveLength(0)
-      expect(result.nextCursor).toBeUndefined()
-      expect(result.prevCursor).toBeUndefined()
+      expect(result).toEqual({
+        result: [],
+        nextCursor: undefined,
+        prevCursor: undefined,
+      })
     })
 
     it('should handle malformed cursors gracefully', async () => {

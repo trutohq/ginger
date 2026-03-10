@@ -1,5 +1,5 @@
 /**
- * Complete example of using the D1 library with:
+ * Complete example of using the Ginger library with:
  * - Secret apiKey field
  * - Join to teams table
  * - Custom method withMembership
@@ -77,7 +77,10 @@ const userSecrets = [
 /**
  * Factory function to create users service with tenant hooks and encryption keys
  */
-function createUsersService(db: any, encryptionKeys: Record<string, string>) {
+export function createUsersService(
+  db: any,
+  encryptionKeys: Record<string, string>,
+) {
   return createService({
     table: 'users',
     db,
@@ -142,7 +145,7 @@ function createUsersService(db: any, encryptionKeys: Record<string, string>) {
  * Example usage in a Cloudflare Worker
  */
 export default {
-  async fetch(request: Request, env: any, ctx: any): Promise<Response> {
+  async fetch(_request: Request, env: any, _ctx: any): Promise<Response> {
     // Get encryption keys from Cloudflare environment variables/secrets
     const encryptionKeys = {
       default: env.ENCRYPTION_KEY_DEFAULT, // Store as base64 encoded key
@@ -150,7 +153,7 @@ export default {
         env.ENCRYPTION_KEY_USER_SECRETS || env.ENCRYPTION_KEY_DEFAULT,
     }
 
-    // Initialize the service with the D1 binding and encryption keys
+    // Initialize the service with the database binding and encryption keys
     const usersService = createService({
       table: 'users',
       db: env.DB, // Cloudflare D1 binding

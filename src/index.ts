@@ -1,7 +1,9 @@
 /**
- * Cloudflare D1 TypeScript Library
+ * Ginger — A type-safe SQLite data access layer
  *
- * A type-safe data access layer for Cloudflare D1 with advanced features:
+ * Works with Cloudflare D1, Bun SQLite, and Durable Object SqlStorage.
+ *
+ * Features:
  * - Cursor-based pagination
  * - Type-safe joins with conditional inclusion
  * - AES-256-GCM encryption for secret fields
@@ -24,10 +26,10 @@ export type {
   CreateParams,
   CursorToken,
   // Core types
-  D1Database,
-  D1ExecResult,
-  D1PreparedStatement,
-  D1Result,
+  Database,
+  ExecResult,
+  PreparedStatement,
+  QueryResult,
   DeleteParams,
   ErrorCtx,
   GetParams,
@@ -105,6 +107,15 @@ export {
   escapeTable,
 } from './sql-builder.js'
 
+// Database adapters
+export { fromBunSqlite, fromDurableObjectStorage } from './adapters/index.js'
+export type {
+  BunSqliteDatabase,
+  BunSqliteStatement,
+  DurableObjectSqlStorage,
+  SqlStorageCursor,
+} from './adapters/index.js'
+
 // Re-export zod v4 for convenience
 export * as z from 'zod/v4'
 
@@ -113,11 +124,11 @@ export * as z from 'zod/v4'
  *
  * @example
  * ```typescript
- * import { createService, z } from './d1-library'
+ * import { createService, z } from 'ginger'
  *
  * const userService = createService({
  *   table: 'users',
- *   db: env.DB, // Cloudflare D1 binding
+ *   db, // Database instance (D1 binding, fromBunSqlite, or fromDurableObjectStorage)
  *   rowSchema: z.object({
  *     id: z.number(),
  *     name: z.string(),

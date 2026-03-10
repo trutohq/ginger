@@ -37,7 +37,7 @@ export interface DurableObjectSqlStorage {
  *
  * @example
  * ```typescript
- * import { createService, fromDurableObjectStorage } from 'ginger'
+ * import { createService, fromDurableObjectStorage } from '@truto/ginger'
  *
  * export class MyDO extends DurableObject {
  *   service = createService({

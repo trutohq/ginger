@@ -124,7 +124,7 @@ export * as z from 'zod/v4'
  *
  * @example
  * ```typescript
- * import { createService, z } from 'ginger'
+ * import { createService, z } from '@truto/ginger'
  *
  * const userService = createService({
  *   table: 'users',

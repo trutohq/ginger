@@ -34,7 +34,7 @@ export interface BunSqliteDatabase {
  * @example
  * ```typescript
  * import { Database } from 'bun:sqlite'
- * import { createService, fromBunSqlite } from 'ginger'
+ * import { createService, fromBunSqlite } from '@truto/ginger'
  *
  * const bunDb = new Database(':memory:')
  * const db = fromBunSqlite(bunDb)

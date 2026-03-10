@@ -7,7 +7,7 @@ Built with TypeScript and [Zod v4](https://zod.dev/) for complete type safety. A
 ## Install
 
 ```bash
-bun add ginger
+bun add @truto/ginger
 ```
 
 Peer dependencies:
@@ -40,7 +40,7 @@ import {
   type Database,
   type JoinDef,
   type SecretFieldDef,
-} from 'ginger'
+} from '@truto/ginger'
 
 // ── Schemas ──────────────────────────────────────────────────────────
 
@@ -209,7 +209,7 @@ Ginger works with any SQLite database that satisfies the `Database` interface. T
 **Cloudflare D1** — pass the binding directly, no adapter needed:
 
 ```typescript
-import { createService } from 'ginger'
+import { createService } from '@truto/ginger'
 
 const service = createService({
   table: 'users',
@@ -222,7 +222,7 @@ const service = createService({
 
 ```typescript
 import { Database } from 'bun:sqlite'
-import { createService, fromBunSqlite } from 'ginger'
+import { createService, fromBunSqlite } from '@truto/ginger'
 
 const bunDb = new Database('myapp.sqlite')
 const service = createService({
@@ -236,7 +236,7 @@ const service = createService({
 
 ```typescript
 import { DurableObject } from 'cloudflare:workers'
-import { createService, fromDurableObjectStorage } from 'ginger'
+import { createService, fromDurableObjectStorage } from '@truto/ginger'
 
 export class MyDO extends DurableObject {
   service = createService({
@@ -250,7 +250,7 @@ export class MyDO extends DurableObject {
 ### Service configuration
 
 ```typescript
-import { createService, z } from 'ginger'
+import { createService, z } from '@truto/ginger'
 
 const service = createService({
   table: 'users',
@@ -398,7 +398,7 @@ const service = createService({
 Generate a key:
 
 ```typescript
-import { generateSecretKey } from 'ginger'
+import { generateSecretKey } from '@truto/ginger'
 
 const key = await generateSecretKey()
 // → base64-encoded 256-bit key
@@ -512,7 +512,7 @@ import {
   EncryptionError,
   HookError,
   CursorError,
-} from 'ginger'
+} from '@truto/ginger'
 
 try {
   await service.get(id, { auth })

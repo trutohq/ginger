@@ -25,6 +25,7 @@ export interface BunSqliteStatement {
 export interface BunSqliteDatabase {
   prepare(query: string): BunSqliteStatement
   exec(query: string): void
+  serialize?(): Uint8Array
 }
 
 /**
@@ -52,75 +53,40 @@ export function fromBunSqlite(bunDb: BunSqliteDatabase): Database {
             return makebound([...values, ...more])
           },
           first<T>(): Promise<T | null> {
-            try {
-              const row = stmt.get(...values)
-              return Promise.resolve((row as T) ?? null)
-            } catch {
-              return Promise.resolve(null)
-            }
+            const row = stmt.get(...values)
+            return Promise.resolve((row as T) ?? null)
           },
           all<T>(): Promise<QueryResult<T[]>> {
-            try {
-              const rows = stmt.all(...values)
-              return Promise.resolve({
-                success: true,
-                results: rows as T[],
-                meta: {
-                  duration: 0,
-                  size_after: 0,
-                  rows_read: rows.length,
-                  rows_written: 0,
-                  last_row_id: 0,
-                  changed_db: false,
-                  changes: 0,
-                },
-              })
-            } catch {
-              return Promise.resolve({
-                success: false,
-                results: [] as T[],
-                meta: {
-                  duration: 0,
-                  size_after: 0,
-                  rows_read: 0,
-                  rows_written: 0,
-                  last_row_id: 0,
-                  changed_db: false,
-                  changes: 0,
-                },
-              })
-            }
+            const rows = stmt.all(...values)
+            return Promise.resolve({
+              success: true,
+              results: rows as T[],
+              meta: {
+                duration: 0,
+                size_after: 0,
+                rows_read: rows.length,
+                rows_written: 0,
+                last_row_id: 0,
+                changed_db: false,
+                changes: 0,
+              },
+            })
           },
           run(): Promise<QueryResult> {
-            try {
-              const result = stmt.run(...values)
-              const changes = result.changes ?? 0
-              return Promise.resolve({
-                success: true,
-                meta: {
-                  duration: 0,
-                  size_after: 0,
-                  rows_read: 0,
-                  rows_written: changes,
-                  last_row_id: Number(result.lastInsertRowid ?? 0),
-                  changed_db: changes > 0,
-                  changes,
-                },
-              })
-            } catch {
-              return Promise.resolve({
-                success: false,
-                meta: {
-                  duration: 0,
-                  size_after: 0,
-                  rows_read: 0,
-                  rows_written: 0,
-                  last_row_id: 0,
-                  changed_db: false,
-                  changes: 0,
-                },
-              })
-            }
+            const result = stmt.run(...values)
+            const changes = result.changes ?? 0
+            return Promise.resolve({
+              success: true,
+              meta: {
+                duration: 0,
+                size_after: 0,
+                rows_read: 0,
+                rows_written: changes,
+                last_row_id: Number(result.lastInsertRowid ?? 0),
+                changed_db: changes > 0,
+                changes,
+              },
+            })
           },
           raw<T>(): Promise<T[]> {
             return Promise.resolve(stmt.all(...values) as T[])
@@ -147,13 +113,9 @@ export function fromBunSqlite(bunDb: BunSqliteDatabase): Database {
       }
     },
 
-    batch<T>(statements: PreparedStatement[]): Promise<QueryResult<T>[]> {
-      return Promise.resolve(
-        statements.map((s) => {
-          const r = s.run() as unknown as QueryResult<T>
-          return r
-        }),
-      )
+    async batch<T>(statements: PreparedStatement[]): Promise<QueryResult<T>[]> {
+      const results = await Promise.all(statements.map((s) => s.run()))
+      return results as unknown as QueryResult<T>[]
     },
 
     exec(query: string): Promise<ExecResult> {
@@ -162,7 +124,13 @@ export function fromBunSqlite(bunDb: BunSqliteDatabase): Database {
     },
 
     dump(): Promise<ArrayBuffer> {
-      return Promise.resolve(new ArrayBuffer(0))
+      if (!bunDb.serialize) {
+        throw new Error(
+          'dump() is not supported: the underlying database does not implement serialize()',
+        )
+      }
+      const bytes = bunDb.serialize()
+      return Promise.resolve(bytes.buffer as ArrayBuffer)
     },
   }
 }

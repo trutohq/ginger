@@ -58,79 +58,44 @@ export function fromDurableObjectStorage(
             return makeBound([...values, ...more])
           },
           first<T>(): Promise<T | null> {
-            try {
-              const cursor = sql.exec<T>(query, ...values)
-              const rows = cursor.toArray()
-              return Promise.resolve(rows[0] ?? null)
-            } catch {
-              return Promise.resolve(null)
-            }
+            const cursor = sql.exec<T>(query, ...values)
+            const rows = cursor.toArray()
+            return Promise.resolve(rows[0] ?? null)
           },
           all<T>(): Promise<QueryResult<T[]>> {
-            try {
-              const cursor = sql.exec<T>(query, ...values)
-              const rows = cursor.toArray()
-              return Promise.resolve({
-                success: true,
-                results: rows,
-                meta: {
-                  duration: 0,
-                  size_after: 0,
-                  rows_read: cursor.rowsRead,
-                  rows_written: cursor.rowsWritten,
-                  last_row_id: 0,
-                  changed_db: cursor.rowsWritten > 0,
-                  changes: cursor.rowsWritten,
-                },
-              })
-            } catch {
-              return Promise.resolve({
-                success: false,
-                results: [] as T[],
-                meta: {
-                  duration: 0,
-                  size_after: 0,
-                  rows_read: 0,
-                  rows_written: 0,
-                  last_row_id: 0,
-                  changed_db: false,
-                  changes: 0,
-                },
-              })
-            }
+            const cursor = sql.exec<T>(query, ...values)
+            const rows = cursor.toArray()
+            return Promise.resolve({
+              success: true,
+              results: rows,
+              meta: {
+                duration: 0,
+                size_after: 0,
+                rows_read: cursor.rowsRead,
+                rows_written: cursor.rowsWritten,
+                last_row_id: 0,
+                changed_db: cursor.rowsWritten > 0,
+                changes: cursor.rowsWritten,
+              },
+            })
           },
           run(): Promise<QueryResult> {
-            try {
-              const cursor = sql.exec(query, ...values)
-              const lastRowId = sql
-                .exec<{ lid: number }>('SELECT last_insert_rowid() AS lid')
-                .one().lid
-              return Promise.resolve({
-                success: true,
-                meta: {
-                  duration: 0,
-                  size_after: 0,
-                  rows_read: cursor.rowsRead,
-                  rows_written: cursor.rowsWritten,
-                  last_row_id: lastRowId,
-                  changed_db: cursor.rowsWritten > 0,
-                  changes: cursor.rowsWritten,
-                },
-              })
-            } catch {
-              return Promise.resolve({
-                success: false,
-                meta: {
-                  duration: 0,
-                  size_after: 0,
-                  rows_read: 0,
-                  rows_written: 0,
-                  last_row_id: 0,
-                  changed_db: false,
-                  changes: 0,
-                },
-              })
-            }
+            const cursor = sql.exec(query, ...values)
+            const lastRowId = sql
+              .exec<{ lid: number }>('SELECT last_insert_rowid() AS lid')
+              .one().lid
+            return Promise.resolve({
+              success: true,
+              meta: {
+                duration: 0,
+                size_after: 0,
+                rows_read: cursor.rowsRead,
+                rows_written: cursor.rowsWritten,
+                last_row_id: lastRowId,
+                changed_db: cursor.rowsWritten > 0,
+                changes: cursor.rowsWritten,
+              },
+            })
           },
           raw<T>(): Promise<T[]> {
             const cursor = sql.exec<T>(query, ...values)
@@ -158,13 +123,9 @@ export function fromDurableObjectStorage(
       }
     },
 
-    batch<T>(statements: PreparedStatement[]): Promise<QueryResult<T>[]> {
-      return Promise.resolve(
-        statements.map((s) => {
-          const r = s.run() as unknown as QueryResult<T>
-          return r
-        }),
-      )
+    async batch<T>(statements: PreparedStatement[]): Promise<QueryResult<T>[]> {
+      const results = await Promise.all(statements.map((s) => s.run()))
+      return results as unknown as QueryResult<T>[]
     },
 
     exec(query: string): Promise<ExecResult> {
@@ -173,7 +134,9 @@ export function fromDurableObjectStorage(
     },
 
     dump(): Promise<ArrayBuffer> {
-      return Promise.resolve(new ArrayBuffer(0))
+      throw new Error(
+        'dump() is not supported by the Durable Object SqlStorage adapter',
+      )
     },
   }
 }

@@ -86,8 +86,18 @@ export function buildSelect(
     // Add ORDER BY
     if (options.orderBy && options.orderBy.length > 0) {
       const orderFragments = options.orderBy.map((order) => {
-        const direction = { text: order.direction.toUpperCase(), values: [] }
-        return sql`${sql.ident(`${table}.${order.column}`)} ${direction}`
+        const col = sql.ident(`${table}.${order.column}`)
+        switch (order.direction.toLowerCase()) {
+          case 'asc':
+            return sql`${col} ASC`
+          case 'desc':
+            return sql`${col} DESC`
+          default:
+            throw new SqlBuilderError(
+              `Invalid ORDER BY direction: "${order.direction}". Must be "asc" or "desc".`,
+              { direction: order.direction },
+            )
+        }
       })
       finalParts.push(sql`ORDER BY ${sql.join(orderFragments, ', ')}`)
     }
@@ -128,10 +138,8 @@ function buildJoin(
 
     const joinFragments = [throughJoin, remoteJoin]
 
-    // Add WHERE condition for the join if specified
-    if (joinDef.where) {
-      const whereCondition = { text: joinDef.where, values: [] }
-      joinFragments.push(sql`AND ${whereCondition}`)
+    if (joinDef.where && Object.keys(joinDef.where).length > 0) {
+      joinFragments.push(sql`AND ${compileFilter(joinDef.where as any)}`)
     }
 
     return sql.join(joinFragments, ' ')
@@ -141,10 +149,8 @@ function buildJoin(
       sql`LEFT JOIN ${sql.ident(remote.table)} ON ${sql.ident(`${baseTable}.${localPk}`)} = ${sql.ident(`${remote.table}.${remote.pk}`)}`,
     ]
 
-    // Add WHERE condition for the join if specified
-    if (joinDef.where) {
-      const whereCondition = { text: joinDef.where, values: [] }
-      joinFragments.push(sql`AND ${whereCondition}`)
+    if (joinDef.where && Object.keys(joinDef.where).length > 0) {
+      joinFragments.push(sql`AND ${compileFilter(joinDef.where as any)}`)
     }
 
     return sql.join(joinFragments, ' ')

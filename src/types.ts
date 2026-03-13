@@ -218,7 +218,7 @@ export interface JoinDef {
     select: string[]
     alias?: string
   }
-  where?: string
+  where?: Record<string, unknown>
   schema: z.ZodTypeAny
 }
 
@@ -297,6 +297,15 @@ export interface BaseService<
 }
 
 /**
+ * Timestamp column configuration.
+ * Only configured columns will be auto-populated on create/update.
+ */
+export interface TimestampConfig {
+  createdAt?: string
+  updatedAt?: string
+}
+
+/**
  * Service options interface
  */
 export interface ServiceOptions<
@@ -318,6 +327,7 @@ export interface ServiceOptions<
   updateSchema: TUpdate
   joins?: TJoins
   secrets?: TSecrets
+  timestamps?: TimestampConfig
   hooks?: Partial<HookMap<BaseCtx>>
   deps?: TDeps
   primaryKey?: string | string[]

@@ -60,7 +60,7 @@ const userJoins = {
       select: ['id', 'name', 'description'],
       alias: 'team',
     },
-    where: 'teams.active = 1',
+    where: { $teams: { active: 1 } },
     schema: TeamRowSchema,
   },
 } satisfies Record<string, JoinDef>

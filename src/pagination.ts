@@ -124,18 +124,17 @@ export function buildCursorConditions(
       ? sql.ident(`${tableName}.${order.column}`)
       : sql.ident(order.column)
 
-    // Determine comparison operator
-    let operator: string
-    if (direction === 'next') {
-      operator = order.direction === 'asc' ? '>' : '<'
-    } else {
-      operator = order.direction === 'asc' ? '<' : '>'
-    }
+    // Determine if we need > or < based on cursor direction and sort direction
+    const useGreaterThan =
+      (direction === 'next') === (order.direction === 'asc')
 
     if (i === orderBy.length - 1) {
       // Last column: simple comparison
-      const operatorFragment = sql.raw(operator)
-      conditions.push(sql`${columnIdent} ${operatorFragment} ${value}`)
+      conditions.push(
+        useGreaterThan
+          ? sql`${columnIdent} > ${value}`
+          : sql`${columnIdent} < ${value}`,
+      )
     } else {
       // Multi-column: build composite condition
       // (col1 = ? AND col2 = ? AND ... AND colN > ?) OR
@@ -155,15 +154,12 @@ export function buildCursorConditions(
 
         if (j === i) {
           // Last condition in this group: use comparison
-          let currentOperator: string
-          if (direction === 'next') {
-            currentOperator = currentOrder.direction === 'asc' ? '>' : '<'
-          } else {
-            currentOperator = currentOrder.direction === 'asc' ? '<' : '>'
-          }
-          const currentOperatorFragment = sql.raw(currentOperator)
+          const currentUseGt =
+            (direction === 'next') === (currentOrder.direction === 'asc')
           equalityConditions.push(
-            sql`${currentColumnIdent} ${currentOperatorFragment} ${currentValue}`,
+            currentUseGt
+              ? sql`${currentColumnIdent} > ${currentValue}`
+              : sql`${currentColumnIdent} < ${currentValue}`,
           )
         } else {
           // Earlier conditions: use equality

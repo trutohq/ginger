@@ -54,6 +54,7 @@ export type {
   ServiceOptions,
   // Helper types
   ServiceRow,
+  TimestampConfig,
   ServiceUpdate,
   UpdateParams,
 } from './types.js'

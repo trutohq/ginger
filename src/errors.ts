@@ -82,7 +82,9 @@ export class HookError extends ServiceError {
       `Hook error in ${hookPhase} phase of ${methodName}: ${originalError.message}`,
       'HOOK_ERROR',
       500,
-      details ? { originalError, ...details } : { originalError },
+      details
+        ? { ...(details as Record<string, unknown>), originalError }
+        : { originalError },
     )
   }
 }

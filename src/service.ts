@@ -43,6 +43,7 @@ import type {
   QueryParams,
   SecretFieldDef,
   ServiceOptions,
+  TimestampConfig,
   UpdateParams,
 } from './types.js'
 
@@ -68,6 +69,7 @@ export class Service<
   public readonly defaultOrderBy: OrderBy | undefined
   public readonly keyProvider: KeyProvider
   public readonly deps: Record<string, BaseService<any, any, any, any, any>>
+  public readonly timestamps: TimestampConfig | undefined
 
   private readonly hooks: Partial<HookMap<BaseCtx>>
 
@@ -85,6 +87,7 @@ export class Service<
     this.deps = options.deps || {}
     this.primaryKey = options.primaryKey || 'id'
     this.defaultOrderBy = options.defaultOrderBy
+    this.timestamps = options.timestamps
     this.keyProvider =
       options.keyProvider ||
       new DefaultKeyProvider(options.encryptionKeys || {})
@@ -127,9 +130,11 @@ export class Service<
       let orderBy =
         paramOrderBy || getDefaultOrderBy(this.primaryKey, this.defaultOrderBy)
 
-      // Validate order by columns
+      // Validate order by columns (skip if schema shape is unavailable)
       const allowedColumns = this.getAllowedColumns()
-      validateOrderBy(orderBy, allowedColumns)
+      if (!allowedColumns.includes('*')) {
+        validateOrderBy(orderBy, allowedColumns)
+      }
 
       // Handle cursor pagination
       let cursorConditions: ReturnType<typeof sql> | undefined
@@ -141,6 +146,10 @@ export class Service<
 
           // Use cursor's orderBy if present
           if (cursorToken.orderBy.length > 0) {
+            // Re-validate cursor columns against allowlist to prevent bypass
+            if (!allowedColumns.includes('*')) {
+              validateOrderBy(cursorToken.orderBy, allowedColumns)
+            }
             orderBy =
               cursorToken.direction === 'prev'
                 ? reverseOrderBy(cursorToken.orderBy)
@@ -336,12 +345,16 @@ export class Service<
         unknown
       >
 
-      // Add timestamp fields
-      const now = new Date().toISOString()
-      const dataWithTimestamps: Record<string, unknown> = {
-        ...validatedData,
-        created_at: now,
-        updated_at: now,
+      // Add timestamp fields if configured
+      let dataWithTimestamps: Record<string, unknown> = { ...validatedData }
+      if (this.timestamps) {
+        const now = new Date().toISOString()
+        if (this.timestamps.createdAt) {
+          dataWithTimestamps[this.timestamps.createdAt] = now
+        }
+        if (this.timestamps.updatedAt) {
+          dataWithTimestamps[this.timestamps.updatedAt] = now
+        }
       }
 
       // Encrypt secrets
@@ -416,14 +429,15 @@ export class Service<
       }
 
       // Validate input data
-      const validatedData = (this.updateSchema as any)
-        .partial()
-        .parse(data) as Record<string, unknown>
+      const validatedData = this.updateSchema.parse(data) as Record<
+        string,
+        unknown
+      >
 
-      // Add updated timestamp
-      const dataWithTimestamp: Record<string, unknown> = {
-        ...validatedData,
-        updated_at: new Date().toISOString(),
+      // Add updated timestamp if configured
+      let dataWithTimestamp: Record<string, unknown> = { ...validatedData }
+      if (this.timestamps?.updatedAt) {
+        dataWithTimestamp[this.timestamps.updatedAt] = new Date().toISOString()
       }
 
       // Encrypt secrets
@@ -655,36 +669,44 @@ export class Service<
    * Get columns to select based on secrets configuration
    */
   private getSelectColumns(includeSecrets: boolean): string[] {
-    // Return specific columns instead of wildcard to avoid SQL builder issues
-    const baseColumns = [
-      'id',
-      'name',
-      'email',
-      'tenant_id',
-      'created_at',
-      'updated_at',
-    ]
+    const schemaColumns = this.getSchemaColumns()
 
-    if (!this.secrets || includeSecrets) {
-      // Include secret columns if requested
-      if (this.secrets) {
-        const secretColumns = this.secrets.map((secret) => secret.columnName)
-        return [...baseColumns, ...secretColumns]
-      }
-      return baseColumns
+    if (!this.secrets) {
+      return schemaColumns
     }
 
-    // Exclude secret columns
-    return baseColumns
+    const secretColumnNames = new Set(this.secrets.map((s) => s.columnName))
+
+    if (includeSecrets) {
+      const columns = [...schemaColumns]
+      for (const col of secretColumnNames) {
+        if (!columns.includes(col)) {
+          columns.push(col)
+        }
+      }
+      return columns
+    }
+
+    return schemaColumns.filter((col) => !secretColumnNames.has(col))
   }
 
   /**
    * Get allowed columns for ordering
    */
   private getAllowedColumns(): string[] {
-    // In practice, you'd want to be more restrictive
-    // For now, allow any column name that's a valid identifier
-    return ['id', 'created_at', 'updated_at', 'name', 'email'] // Example columns
+    return this.getSchemaColumns()
+  }
+
+  /**
+   * Derive column names from the row schema shape.
+   * Falls back to wildcard if the schema doesn't expose a shape.
+   */
+  private getSchemaColumns(): string[] {
+    const shape = (this.rowSchema as any).shape
+    if (shape && typeof shape === 'object') {
+      return Object.keys(shape)
+    }
+    return ['*']
   }
 
   /**
@@ -799,46 +821,41 @@ export class Service<
     for (const [joinName, joinDef] of Object.entries(this.joins)) {
       if (!include[joinName] || joinDef.kind !== 'many') continue
 
-      try {
-        let relatedRecords: any[] = []
+      let relatedRecords: any[] = []
 
-        if (joinDef.through) {
-          // Many-to-many relationship through junction table
-          const sql = `
-            SELECT ${joinDef.remote.select.map((col) => `${joinDef.remote.table}.${col}`).join(', ')}
-            FROM ${joinDef.remote.table}
-            INNER JOIN ${joinDef.through.table} ON ${joinDef.remote.table}.${joinDef.remote.pk} = ${joinDef.through.table}.${joinDef.through.to}
-            WHERE ${joinDef.through.table}.${joinDef.through.from} = ?
-          `
+      if (joinDef.through) {
+        const selectColumns = joinDef.remote.select.map(
+          (col) => sql`${sql.ident(`${joinDef.remote.table}.${col}`)}`,
+        )
+        const query = sql`SELECT ${sql.join(selectColumns, ', ')}
+            FROM ${sql.ident(joinDef.remote.table)}
+            INNER JOIN ${sql.ident(joinDef.through.table)}
+              ON ${sql.ident(`${joinDef.remote.table}.${joinDef.remote.pk}`)} = ${sql.ident(`${joinDef.through.table}.${joinDef.through.to}`)}
+            WHERE ${sql.ident(`${joinDef.through.table}.${joinDef.through.from}`)} = ${mainRecordId}`
 
-          const stmt = this.db.prepare(sql)
-          const queryResult = await stmt.bind(mainRecordId).all()
+        const stmt = this.db.prepare(query.text)
+        const queryResult = await stmt.bind(...query.values).all()
 
-          if (queryResult.success) {
-            relatedRecords = queryResult.results as any[]
-          }
-        } else {
-          // Direct one-to-many relationship
-          const sql = `
-            SELECT ${joinDef.remote.select.map((col) => `${col}`).join(', ')}
-            FROM ${joinDef.remote.table}
-            WHERE ${joinDef.remote.pk} = ?
-          `
-
-          const stmt = this.db.prepare(sql)
-          const queryResult = await stmt.bind(mainRecordId).all()
-
-          if (queryResult.success) {
-            relatedRecords = queryResult.results as any[]
-          }
+        if (queryResult.success) {
+          relatedRecords = queryResult.results as any[]
         }
+      } else {
+        const selectColumns = joinDef.remote.select.map(
+          (col) => sql`${sql.ident(col)}`,
+        )
+        const query = sql`SELECT ${sql.join(selectColumns, ', ')}
+            FROM ${sql.ident(joinDef.remote.table)}
+            WHERE ${sql.ident(joinDef.remote.pk)} = ${mainRecordId}`
 
-        // Set the join data
-        result[joinName] = relatedRecords || []
-      } catch (error) {
-        console.error(`Error fetching one-to-many join ${joinName}:`, error)
-        result[joinName] = []
+        const stmt = this.db.prepare(query.text)
+        const queryResult = await stmt.bind(...query.values).all()
+
+        if (queryResult.success) {
+          relatedRecords = queryResult.results as any[]
+        }
       }
+
+      result[joinName] = relatedRecords || []
     }
 
     return result

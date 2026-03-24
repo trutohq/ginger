@@ -2,10 +2,12 @@ name: Publish to npm
 
 on:
   push:
-    tags: ['v*']
+    branches: [main]
+    paths:
+      - package.json
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 jobs:
@@ -17,33 +19,70 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Check if version is new
+        id: version_check
+        run: |
+          LOCAL_VERSION=$(node -p "require('./package.json').version")
+          PACKAGE_NAME=$(node -p "require('./package.json').name")
+          echo "local_version=$LOCAL_VERSION" >> "$GITHUB_OUTPUT"
+          echo "package_name=$PACKAGE_NAME" >> "$GITHUB_OUTPUT"
+
+          NPM_VERSION=$(npm view "$PACKAGE_NAME" version 2>/dev/null || echo "0.0.0")
+          echo "npm_version=$NPM_VERSION" >> "$GITHUB_OUTPUT"
+
+          if [ "$LOCAL_VERSION" = "$NPM_VERSION" ]; then
+            echo "Version $LOCAL_VERSION already published, skipping."
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "New version detected: $LOCAL_VERSION (npm has $NPM_VERSION)"
+            echo "should_publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Setup Bun
+        if: steps.version_check.outputs.should_publish == 'true'
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
 
       - name: Setup Node (for npm publish)
+        if: steps.version_check.outputs.should_publish == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
       - name: Install dependencies
+        if: steps.version_check.outputs.should_publish == 'true'
         run: bun install --frozen-lockfile
 
       - name: Type check
+        if: steps.version_check.outputs.should_publish == 'true'
         run: bun run typecheck
 
       - name: Lint
+        if: steps.version_check.outputs.should_publish == 'true'
         run: bun run lint
 
       - name: Test
+        if: steps.version_check.outputs.should_publish == 'true'
         run: bun test
 
       - name: Build
+        if: steps.version_check.outputs.should_publish == 'true'
         run: bun run build
 
       - name: Publish to npm
+        if: steps.version_check.outputs.should_publish == 'true'
         run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create git tag and GitHub release
+        if: steps.version_check.outputs.should_publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="v${{ steps.version_check.outputs.local_version }}"
+          git tag "$VERSION"
+          git push origin "$VERSION"
+          gh release create "$VERSION" --title "$VERSION" --generate-notes

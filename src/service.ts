@@ -363,21 +363,34 @@ export class Service<
         processedData = await this.encryptDataSecrets(processedData)
       }
 
-      // Build and execute insert
-      const { text: query, values: params } = buildInsert(
+      // Build insert with RETURNING to get the primary key directly
+      const { text: insertQuery, values: params } = buildInsert(
         this.table,
         processedData,
       )
-      const stmt = this.db.prepare(query)
-      const result = await stmt.bind(...params).run()
+      const pkColumns = Array.isArray(this.primaryKey)
+        ? this.primaryKey
+        : [this.primaryKey]
+      const returningClause = pkColumns.map((c) => `"${c}"`).join(', ')
+      const query = `${insertQuery} RETURNING ${returningClause}`
 
-      if (!result.success) {
+      const stmt = this.db.prepare(query)
+      const inserted = (await stmt.bind(...params).first()) as Record<
+        string,
+        unknown
+      > | null
+
+      if (!inserted) {
         throw new DatabaseError('Failed to create record')
       }
 
-      // Get the created record
-      const insertId = result.meta.last_row_id
-      const createdRecord = await this.get(insertId, {
+      const insertId: string | number | Record<string, unknown> = Array.isArray(
+        this.primaryKey,
+      )
+        ? Object.fromEntries(this.primaryKey.map((k) => [k, inserted[k]]))
+        : (inserted[this.primaryKey] as string | number)
+
+      const createdRecord = await this.get(insertId as string | number, {
         include,
         includeSecrets,
         auth: opts.auth,

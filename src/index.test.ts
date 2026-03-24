@@ -1280,6 +1280,225 @@ describe('Ginger Library - Comprehensive Tests', () => {
     })
   })
 
+  describe('create() with non-integer primary keys', () => {
+    it('should create a record with a TEXT primary key', async () => {
+      bunDb.exec(`
+        CREATE TABLE documents (
+          doc_id TEXT PRIMARY KEY,
+          title TEXT NOT NULL,
+          body TEXT
+        );
+      `)
+
+      const docService = createService({
+        table: 'documents',
+        db,
+        primaryKey: 'doc_id',
+        rowSchema: z.object({
+          doc_id: z.string(),
+          title: z.string(),
+          body: z.string().nullable(),
+        }),
+        createSchema: z.object({
+          doc_id: z.string(),
+          title: z.string(),
+          body: z.string().optional(),
+        }),
+        updateSchema: z.object({
+          title: z.string().optional(),
+          body: z.string().optional(),
+        }),
+      })
+
+      const doc = await docService.create(
+        { doc_id: 'doc-abc-123', title: 'Hello', body: 'World' },
+        { auth: {} },
+      )
+
+      expect(doc).toEqual({
+        doc_id: 'doc-abc-123',
+        title: 'Hello',
+        body: 'World',
+      })
+
+      const fetched = await docService.get('doc-abc-123', { auth: {} })
+      expect(fetched).toEqual(doc)
+    })
+
+    it('should create a record with a UUID primary key', async () => {
+      bunDb.exec(`
+        CREATE TABLE tokens (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          value TEXT NOT NULL
+        );
+      `)
+
+      const tokenService = createService({
+        table: 'tokens',
+        db,
+        primaryKey: 'id',
+        rowSchema: z.object({
+          id: z.string(),
+          name: z.string(),
+          value: z.string(),
+        }),
+        createSchema: z.object({
+          id: z.string(),
+          name: z.string(),
+          value: z.string(),
+        }),
+        updateSchema: z.object({
+          name: z.string().optional(),
+          value: z.string().optional(),
+        }),
+      })
+
+      const uuid = 'f47ac10b-58cc-4372-a567-0e02b2c3d479'
+      const token = await tokenService.create(
+        { id: uuid, name: 'api-key', value: 'secret' },
+        { auth: {} },
+      )
+
+      expect(token).toEqual({
+        id: uuid,
+        name: 'api-key',
+        value: 'secret',
+      })
+
+      const fetched = await tokenService.get(uuid, { auth: {} })
+      expect(fetched).toEqual(token)
+    })
+
+    it('should create a record with a composite primary key', async () => {
+      bunDb.exec(`
+        CREATE TABLE settings (
+          tenant_id TEXT NOT NULL,
+          key TEXT NOT NULL,
+          value TEXT,
+          PRIMARY KEY (tenant_id, key)
+        );
+      `)
+
+      const settingsService = createService({
+        table: 'settings',
+        db,
+        primaryKey: ['tenant_id', 'key'],
+        rowSchema: z.object({
+          tenant_id: z.string(),
+          key: z.string(),
+          value: z.string().nullable(),
+        }),
+        createSchema: z.object({
+          tenant_id: z.string(),
+          key: z.string(),
+          value: z.string().optional(),
+        }),
+        updateSchema: z.object({
+          value: z.string().optional(),
+        }),
+      })
+
+      const setting = await settingsService.create(
+        { tenant_id: 'org-1', key: 'theme', value: 'dark' },
+        { auth: {} },
+      )
+
+      expect(setting).toEqual({
+        tenant_id: 'org-1',
+        key: 'theme',
+        value: 'dark',
+      })
+
+      const fetched = await settingsService.get(
+        { tenant_id: 'org-1', key: 'theme' } as any,
+        { auth: {} },
+      )
+      expect(fetched).toEqual(setting)
+    })
+
+    it('should create a record with an auto-generated DEFAULT primary key', async () => {
+      bunDb.exec(`
+        CREATE TABLE events (
+          id TEXT PRIMARY KEY DEFAULT ('evt_' || lower(hex(randomblob(8)))),
+          type TEXT NOT NULL,
+          payload TEXT
+        );
+      `)
+
+      const eventService = createService({
+        table: 'events',
+        db,
+        primaryKey: 'id',
+        rowSchema: z.object({
+          id: z.string(),
+          type: z.string(),
+          payload: z.string().nullable(),
+        }),
+        createSchema: z.object({
+          type: z.string(),
+          payload: z.string().optional(),
+        }),
+        updateSchema: z.object({
+          payload: z.string().optional(),
+        }),
+      })
+
+      const event = await eventService.create(
+        { type: 'user.created', payload: '{"userId":"u1"}' },
+        { auth: {} },
+      )
+
+      expect(event.type).toBe('user.created')
+      expect(event.payload).toBe('{"userId":"u1"}')
+      expect(event.id).toMatch(/^evt_[0-9a-f]{16}$/)
+
+      const fetched = await eventService.get(event.id, { auth: {} })
+      expect(fetched).toEqual(event)
+    })
+
+    it('should create multiple records with TEXT primary keys', async () => {
+      bunDb.exec(`
+        CREATE TABLE slugs (
+          slug TEXT PRIMARY KEY,
+          url TEXT NOT NULL
+        );
+      `)
+
+      const slugService = createService({
+        table: 'slugs',
+        db,
+        primaryKey: 'slug',
+        rowSchema: z.object({
+          slug: z.string(),
+          url: z.string(),
+        }),
+        createSchema: z.object({
+          slug: z.string(),
+          url: z.string(),
+        }),
+        updateSchema: z.object({
+          url: z.string().optional(),
+        }),
+      })
+
+      const s1 = await slugService.create(
+        { slug: 'hello-world', url: '/posts/1' },
+        { auth: {} },
+      )
+      const s2 = await slugService.create(
+        { slug: 'about-us', url: '/pages/about' },
+        { auth: {} },
+      )
+
+      expect(s1.slug).toBe('hello-world')
+      expect(s2.slug).toBe('about-us')
+
+      const list = await slugService.list({ auth: {} })
+      expect(list.result).toHaveLength(2)
+    })
+  })
+
   describe('Error Handling', () => {
     it('should throw appropriate error types', () => {
       expect(() => {

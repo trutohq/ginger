@@ -9,11 +9,12 @@
 import { createService, z, type JoinDef, type SecretFieldDef } from './index.js'
 
 // Schema definitions
+// Note: secret fields (apiKey) must NOT be in rowSchema — they are managed
+// separately by the secrets config and injected only when includeSecrets: true.
 const UserRowSchema = z.object({
   id: z.number(),
   name: z.string(),
   email: z.string(),
-  apiKey: z.string(), // This will be encrypted
   tenantId: z.string(),
   createdAt: z.string(),
   updatedAt: z.string(),

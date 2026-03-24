@@ -44,6 +44,8 @@ import {
 
 // ── Schemas ──────────────────────────────────────────────────────────
 
+// Secret fields (apiKey / api_key_encrypted) must NOT be in rowSchema.
+// They are managed by the secrets config and returned only when includeSecrets: true.
 const UserRow = z.object({
   id: z.number(),
   name: z.string(),
@@ -369,8 +371,8 @@ Sensitive fields are encrypted with **AES-256-GCM** via Web Crypto and stored as
 ```typescript
 const secrets = [
   {
-    logicalName: 'apiKey', // field in your schema
-    columnName: 'api_key_enc', // column in the DB
+    logicalName: 'apiKey', // field name in your application
+    columnName: 'api_key_enc', // actual column in the DB
     keyId: 'api-keys', // key identifier
   },
 ] as const
@@ -397,6 +399,13 @@ const service = createService({
 })
 ```
 
+> **Important:** Do **not** include secret fields in `rowSchema` — neither the `columnName` (e.g. `api_key_enc`) nor the `logicalName` (e.g. `apiKey`). Ginger manages these separately:
+>
+> - The `columnName` is excluded from SELECT queries by default and included only when `includeSecrets: true`.
+> - The `logicalName` is injected into the result after decryption when `includeSecrets: true`.
+>
+> If you accidentally include either in `rowSchema`, Ginger will throw a `ValidationError` at service creation time with a clear message explaining what to remove.
+
 Generate a key:
 
 ```typescript
@@ -406,10 +415,10 @@ const key = await generateSecretKey()
 // → base64-encoded 256-bit key
 ```
 
-Encryption is injected automatically via hooks:
+Encryption is handled automatically:
 
-- `before.create` / `before.update` — encrypt logical fields → ciphertext column
-- `after.get` / `after.list` (when `includeSecrets: true`) — decrypt back
+- On `create` / `update` — the `logicalName` field is encrypted and stored in the `columnName` column
+- On `get` / `list` (when `includeSecrets: true`) — the `columnName` column is decrypted and returned as `logicalName`
 
 ### Hooks
 

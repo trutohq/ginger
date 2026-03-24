@@ -31,11 +31,12 @@ describe('Ginger Library - Comprehensive Tests', () => {
   let testSecretKey: string
 
   // Test schemas - using snake_case for database consistency
+  // rowSchema must NOT include secret fields (neither columnName nor logicalName).
+  // Secret columns are managed separately by the secrets config.
   const UserRowSchema = z.object({
     id: z.number(),
     name: z.string(),
     email: z.string(),
-    api_key_encrypted: z.string().nullable().optional(),
     tenant_id: z.string(),
     created_at: z.string(),
     updated_at: z.string().nullable().optional(),
@@ -44,14 +45,14 @@ describe('Ginger Library - Comprehensive Tests', () => {
   const UserCreateSchema = z.object({
     name: z.string().min(1),
     email: z.string().email(),
-    api_key_encrypted: z.string().optional(),
+    apiKey: z.string().optional(),
     tenant_id: z.string(),
   })
 
   const UserUpdateSchema = z.object({
     name: z.string().optional(),
     email: z.string().email().optional(),
-    api_key_encrypted: z.string().optional(),
+    apiKey: z.string().optional(),
   })
 
   const TeamRowSchema = z.object({
@@ -96,7 +97,7 @@ describe('Ginger Library - Comprehensive Tests', () => {
   // Secret field definitions for testing
   const userSecrets = [
     {
-      logicalName: 'api_key_encrypted',
+      logicalName: 'apiKey',
       columnName: 'api_key_encrypted',
       keyId: 'user-secrets',
     },
@@ -250,7 +251,6 @@ describe('Ginger Library - Comprehensive Tests', () => {
             id: 1,
             name: 'John Doe',
             email: 'john@test.com',
-            api_key_encrypted: null,
             tenant_id: 'tenant-1',
             created_at: '2024-01-01T00:00:00Z',
             updated_at: null,
@@ -259,7 +259,6 @@ describe('Ginger Library - Comprehensive Tests', () => {
             id: 2,
             name: 'Jane Smith',
             email: 'jane@test.com',
-            api_key_encrypted: null,
             tenant_id: 'tenant-1',
             created_at: '2024-01-02T00:00:00Z',
             updated_at: null,
@@ -268,7 +267,6 @@ describe('Ginger Library - Comprehensive Tests', () => {
             id: 3,
             name: 'Bob Wilson',
             email: 'bob@test.com',
-            api_key_encrypted: null,
             tenant_id: 'tenant-2',
             created_at: '2024-01-03T00:00:00Z',
             updated_at: null,
@@ -286,7 +284,6 @@ describe('Ginger Library - Comprehensive Tests', () => {
             id: 1,
             name: 'John Doe',
             email: 'john@test.com',
-            api_key_encrypted: null,
             tenant_id: 'tenant-1',
             created_at: '2024-01-01T00:00:00Z',
             updated_at: null,
@@ -295,7 +292,6 @@ describe('Ginger Library - Comprehensive Tests', () => {
             id: 2,
             name: 'Jane Smith',
             email: 'jane@test.com',
-            api_key_encrypted: null,
             tenant_id: 'tenant-1',
             created_at: '2024-01-02T00:00:00Z',
             updated_at: null,
@@ -316,7 +312,6 @@ describe('Ginger Library - Comprehensive Tests', () => {
             id: 1,
             name: 'John Doe',
             email: 'john@test.com',
-            api_key_encrypted: null,
             tenant_id: 'tenant-1',
             created_at: '2024-01-01T00:00:00Z',
             updated_at: null,
@@ -325,7 +320,6 @@ describe('Ginger Library - Comprehensive Tests', () => {
             id: 2,
             name: 'Jane Smith',
             email: 'jane@test.com',
-            api_key_encrypted: null,
             tenant_id: 'tenant-1',
             created_at: '2024-01-02T00:00:00Z',
             updated_at: null,
@@ -346,7 +340,6 @@ describe('Ginger Library - Comprehensive Tests', () => {
             id: 1,
             name: 'John Doe',
             email: 'john@test.com',
-            api_key_encrypted: null,
             tenant_id: 'tenant-1',
             created_at: '2024-01-01T00:00:00Z',
             updated_at: null,
@@ -355,7 +348,6 @@ describe('Ginger Library - Comprehensive Tests', () => {
             id: 2,
             name: 'Jane Smith',
             email: 'jane@test.com',
-            api_key_encrypted: null,
             tenant_id: 'tenant-1',
             created_at: '2024-01-02T00:00:00Z',
             updated_at: null,
@@ -364,7 +356,6 @@ describe('Ginger Library - Comprehensive Tests', () => {
             id: 3,
             name: 'Bob Wilson',
             email: 'bob@test.com',
-            api_key_encrypted: null,
             tenant_id: 'tenant-2',
             created_at: '2024-01-03T00:00:00Z',
             updated_at: null,
@@ -387,7 +378,6 @@ describe('Ginger Library - Comprehensive Tests', () => {
           id: 1,
           name: 'John Doe',
           email: 'john@test.com',
-          api_key_encrypted: null,
           tenant_id: 'tenant-1',
           created_at: '2024-01-01T00:00:00Z',
           updated_at: null,
@@ -415,7 +405,6 @@ describe('Ginger Library - Comprehensive Tests', () => {
           id: 4,
           name: 'Alice Johnson',
           email: 'alice@test.com',
-          api_key_encrypted: null,
           tenant_id: 'tenant-1',
           created_at: expect.stringMatching(
             /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
@@ -467,7 +456,6 @@ describe('Ginger Library - Comprehensive Tests', () => {
           id: 1,
           name: 'John Updated',
           email: 'john@test.com',
-          api_key_encrypted: null,
           tenant_id: 'tenant-1',
           created_at: '2024-01-01T00:00:00Z',
           updated_at: expect.stringMatching(
@@ -601,7 +589,6 @@ describe('Ginger Library - Comprehensive Tests', () => {
             id: 1,
             name: 'John Doe',
             email: 'john@test.com',
-            api_key_encrypted: null,
             tenant_id: 'tenant-1',
             created_at: '2024-01-01T00:00:00Z',
             updated_at: null,
@@ -610,7 +597,6 @@ describe('Ginger Library - Comprehensive Tests', () => {
             id: 2,
             name: 'Jane Smith',
             email: 'jane@test.com',
-            api_key_encrypted: null,
             tenant_id: 'tenant-1',
             created_at: '2024-01-02T00:00:00Z',
             updated_at: null,
@@ -631,7 +617,6 @@ describe('Ginger Library - Comprehensive Tests', () => {
               id: 3,
               name: 'Bob Wilson',
               email: 'bob@test.com',
-              api_key_encrypted: null,
               tenant_id: 'tenant-2',
               created_at: '2024-01-03T00:00:00Z',
               updated_at: null,
@@ -719,7 +704,7 @@ describe('Ginger Library - Comprehensive Tests', () => {
       it('should encrypt secrets in data objects', async () => {
         const data = {
           name: 'John',
-          api_key_encrypted: 'sk_ex_secret123',
+          apiKey: 'sk_ex_secret123',
           email: 'john@test.com',
         }
 
@@ -727,13 +712,12 @@ describe('Ginger Library - Comprehensive Tests', () => {
 
         expect(encrypted.name).toBe('John')
         expect(encrypted.email).toBe('john@test.com')
+        expect(encrypted.apiKey).toBeUndefined()
         expect(typeof encrypted.api_key_encrypted).toBe('string')
-        expect(encrypted.api_key_encrypted).not.toBe('sk_ex_secret123') // Should be encrypted
         expect(encrypted.api_key_encrypted).toMatch(
           /^[A-Za-z0-9+/]+=*:[A-Za-z0-9+/]+=*:[A-Za-z0-9+/]+=*$/,
         )
 
-        // Verify it can be decrypted back to original
         const decrypted = await decrypt(
           encrypted.api_key_encrypted as string,
           keyProvider,
@@ -753,7 +737,7 @@ describe('Ginger Library - Comprehensive Tests', () => {
 
         expect(decrypted).toEqual({
           name: 'John',
-          api_key_encrypted: 'sk_ex_secret123',
+          apiKey: 'sk_ex_secret123',
           email: 'john@test.com',
         })
       })
@@ -769,7 +753,7 @@ describe('Ginger Library - Comprehensive Tests', () => {
       })
 
       it('should throw EncryptionError for non-string secret values', async () => {
-        const data = { api_key_encrypted: 123 as any }
+        const data = { apiKey: 123 as any }
 
         await expect(
           encryptSecrets(data, userSecrets, keyProvider),
@@ -842,14 +826,14 @@ describe('Ginger Library - Comprehensive Tests', () => {
           {
             name: 'Secret User',
             email: 'secret@test.com',
-            api_key_encrypted: 'sk_ex_secret123',
+            apiKey: 'sk_ex_secret123',
             tenant_id: 'tenant-1',
           },
           { auth: {} },
         )
 
         expect(user).toEqual({
-          id: 4, // Should be next auto-increment
+          id: 4,
           name: 'Secret User',
           email: 'secret@test.com',
           tenant_id: 'tenant-1',
@@ -861,7 +845,7 @@ describe('Ginger Library - Comprehensive Tests', () => {
           ),
         })
 
-        // API key should be encrypted in database
+        // API key should be encrypted in the database column
         const rawResult = bunDb
           .prepare('SELECT * FROM users WHERE id = ?')
           .get(user.id) as any
@@ -873,18 +857,16 @@ describe('Ginger Library - Comprehensive Tests', () => {
       })
 
       it('should decrypt secrets when includeSecrets=true', async () => {
-        // First create a user with encrypted secret
         const created = await serviceWithSecrets.create(
           {
             name: 'Secret User',
             email: 'secret@test.com',
-            api_key_encrypted: 'sk_ex_secret123',
+            apiKey: 'sk_ex_secret123',
             tenant_id: 'tenant-1',
           },
           { auth: {} },
         )
 
-        // Get with secrets
         const withSecrets = await serviceWithSecrets.get(created.id, {
           auth: {},
           includeSecrets: true,
@@ -894,7 +876,7 @@ describe('Ginger Library - Comprehensive Tests', () => {
           id: created.id,
           name: 'Secret User',
           email: 'secret@test.com',
-          api_key_encrypted: 'sk_ex_secret123',
+          apiKey: 'sk_ex_secret123',
           tenant_id: 'tenant-1',
           created_at: expect.stringMatching(
             /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
@@ -906,18 +888,16 @@ describe('Ginger Library - Comprehensive Tests', () => {
       })
 
       it('should not include secrets when includeSecrets=false', async () => {
-        // First create a user with encrypted secret
         const created = await serviceWithSecrets.create(
           {
             name: 'Secret User',
             email: 'secret2@test.com',
-            api_key_encrypted: 'sk_ex_secret456',
+            apiKey: 'sk_ex_secret456',
             tenant_id: 'tenant-1',
           },
           { auth: {} },
         )
 
-        // Get without secrets (default)
         const withoutSecrets = await serviceWithSecrets.get(created.id, {
           auth: {},
         })
@@ -934,7 +914,7 @@ describe('Ginger Library - Comprehensive Tests', () => {
             /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
           ),
         })
-        expect(withoutSecrets?.api_key_encrypted).toBeUndefined()
+        expect(withoutSecrets?.apiKey).toBeUndefined()
       })
     })
   })
@@ -966,7 +946,6 @@ describe('Ginger Library - Comprehensive Tests', () => {
         id: 1,
         name: 'John Doe',
         email: 'john@test.com',
-        api_key_encrypted: null,
         tenant_id: 'tenant-1',
         created_at: '2024-01-01T00:00:00Z',
         updated_at: null,
@@ -987,7 +966,6 @@ describe('Ginger Library - Comprehensive Tests', () => {
         id: 2,
         name: 'Jane Smith',
         email: 'jane@test.com',
-        api_key_encrypted: null,
         tenant_id: 'tenant-1',
         created_at: '2024-01-02T00:00:00Z',
         updated_at: null,
@@ -1013,7 +991,6 @@ describe('Ginger Library - Comprehensive Tests', () => {
         id: 1,
         name: 'John Doe',
         email: 'john@test.com',
-        api_key_encrypted: null,
         tenant_id: 'tenant-1',
         created_at: '2024-01-01T00:00:00Z',
         updated_at: null,
@@ -1032,7 +1009,6 @@ describe('Ginger Library - Comprehensive Tests', () => {
         id: 1,
         name: 'John Doe',
         email: 'john@test.com',
-        api_key_encrypted: null,
         tenant_id: 'tenant-1',
         created_at: '2024-01-01T00:00:00Z',
         updated_at: null,
@@ -1060,7 +1036,6 @@ describe('Ginger Library - Comprehensive Tests', () => {
         id: 3,
         name: 'Bob Wilson',
         email: 'bob@test.com',
-        api_key_encrypted: null,
         tenant_id: 'tenant-2',
         created_at: '2024-01-03T00:00:00Z',
         updated_at: null,
@@ -1078,7 +1053,6 @@ describe('Ginger Library - Comprehensive Tests', () => {
         id: 3,
         name: 'Bob Wilson',
         email: 'bob@test.com',
-        api_key_encrypted: null,
         tenant_id: 'tenant-2',
         created_at: '2024-01-03T00:00:00Z',
         updated_at: null,
@@ -1262,7 +1236,6 @@ describe('Ginger Library - Comprehensive Tests', () => {
           id: 1,
           name: 'John Doe',
           email: 'john@test.com',
-          api_key_encrypted: null,
           tenant_id: 'tenant-1',
           created_at: '2024-01-01T00:00:00Z',
           updated_at: null,
@@ -1271,7 +1244,6 @@ describe('Ginger Library - Comprehensive Tests', () => {
           id: 2,
           name: 'Jane Smith',
           email: 'jane@test.com',
-          api_key_encrypted: null,
           tenant_id: 'tenant-1',
           created_at: '2024-01-02T00:00:00Z',
           updated_at: null,
@@ -1499,6 +1471,135 @@ describe('Ginger Library - Comprehensive Tests', () => {
     })
   })
 
+  describe('Secrets + rowSchema validation', () => {
+    it('should reject rowSchema containing secret columnName', () => {
+      const BadRowSchema = z.object({
+        id: z.number(),
+        name: z.string(),
+        api_key_encrypted: z.string().nullable(),
+      })
+
+      expect(() =>
+        createService({
+          table: 'users',
+          db,
+          rowSchema: BadRowSchema,
+          createSchema: z.object({ name: z.string() }),
+          updateSchema: z.object({ name: z.string().optional() }),
+          secrets: [
+            {
+              logicalName: 'apiKey',
+              columnName: 'api_key_encrypted',
+              keyId: 'default',
+            },
+          ],
+          encryptionKeys: { default: testSecretKey },
+        }),
+      ).toThrow(ValidationError)
+    })
+
+    it('should reject rowSchema containing secret logicalName', () => {
+      const BadRowSchema = z.object({
+        id: z.number(),
+        name: z.string(),
+        apiKey: z.string().nullable(),
+      })
+
+      expect(() =>
+        createService({
+          table: 'users',
+          db,
+          rowSchema: BadRowSchema,
+          createSchema: z.object({ name: z.string() }),
+          updateSchema: z.object({ name: z.string().optional() }),
+          secrets: [
+            {
+              logicalName: 'apiKey',
+              columnName: 'api_key_encrypted',
+              keyId: 'default',
+            },
+          ],
+          encryptionKeys: { default: testSecretKey },
+        }),
+      ).toThrow(ValidationError)
+    })
+
+    it('should provide a clear error message for columnName in rowSchema', () => {
+      const BadRowSchema = z.object({
+        id: z.number(),
+        totp_secret_encrypted: z.string().nullable(),
+      })
+
+      expect(() =>
+        createService({
+          table: 'users',
+          db,
+          rowSchema: BadRowSchema,
+          createSchema: z.object({}),
+          updateSchema: z.object({}),
+          secrets: [
+            {
+              logicalName: 'totpSecret',
+              columnName: 'totp_secret_encrypted',
+              keyId: 'default',
+            },
+          ],
+          encryptionKeys: { default: testSecretKey },
+        }),
+      ).toThrow(/totp_secret_encrypted.*columnName.*should not be in rowSchema/)
+    })
+
+    it('should provide a clear error message for logicalName in rowSchema', () => {
+      const BadRowSchema = z.object({
+        id: z.number(),
+        totpSecret: z.string().nullable(),
+      })
+
+      expect(() =>
+        createService({
+          table: 'users',
+          db,
+          rowSchema: BadRowSchema,
+          createSchema: z.object({}),
+          updateSchema: z.object({}),
+          secrets: [
+            {
+              logicalName: 'totpSecret',
+              columnName: 'totp_secret_encrypted',
+              keyId: 'default',
+            },
+          ],
+          encryptionKeys: { default: testSecretKey },
+        }),
+      ).toThrow(/totpSecret.*logicalName.*should not be in rowSchema/)
+    })
+
+    it('should allow services with secrets when rowSchema is correct', () => {
+      const GoodRowSchema = z.object({
+        id: z.number(),
+        name: z.string(),
+      })
+
+      expect(() =>
+        createService({
+          table: 'users',
+          db,
+          rowSchema: GoodRowSchema,
+          createSchema: z.object({ name: z.string() }),
+          updateSchema: z.object({ name: z.string().optional() }),
+          secrets: [
+            {
+              logicalName: 'apiKey',
+              columnName: 'api_key_encrypted',
+              keyId: 'default',
+            },
+          ],
+          encryptionKeys: { default: testSecretKey },
+        }),
+      ).not.toThrow()
+    })
+  })
+
   describe('Error Handling', () => {
     it('should throw appropriate error types', () => {
       expect(() => {
@@ -1569,7 +1670,6 @@ describe('Ginger Library - Comprehensive Tests', () => {
         id: 4,
         name: 'User 0',
         email: 'user0@test.com',
-        api_key_encrypted: null,
         tenant_id: 'tenant-test',
         created_at: '2024-01-01T00:00:00Z',
         updated_at: null,
@@ -1578,7 +1678,6 @@ describe('Ginger Library - Comprehensive Tests', () => {
         id: 5,
         name: 'User 1',
         email: 'user1@test.com',
-        api_key_encrypted: null,
         tenant_id: 'tenant-test',
         created_at: '2024-01-01T00:00:00Z',
         updated_at: null,

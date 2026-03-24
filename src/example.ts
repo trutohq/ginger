@@ -91,25 +91,18 @@ export function createUsersService(
     secrets: userSecrets,
     primaryKey: 'id',
     defaultOrderBy: { column: 'created_at', direction: 'desc' as const },
-    encryptionKeys, // Pass encryption keys directly
+    encryptionKeys,
+    timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' },
     hooks: {
-      // Enforce tenant filtering on all operations
       list: {
         before: async (ctx: any) => {
           if (!ctx.auth.user?.tenantId) {
             throw new Error('User must have a tenant ID')
           }
-          // Add tenant filter to where clause
           if (!ctx.params.where) {
             ctx.params.where = {}
           }
           ctx.params.where.tenantId = ctx.auth.user.tenantId
-
-          // For joins that need tenant filtering, you can:
-          // 1. Ensure proper foreign key relationships in your database schema
-          // 2. Use additional where clauses on the main query
-          // 3. Implement custom filtering logic in hooks
-          // The join definitions remain clean and auth-agnostic
         },
       },
       get: {
@@ -117,8 +110,6 @@ export function createUsersService(
           if (!ctx.auth.user?.tenantId) {
             throw new Error('User must have a tenant ID')
           }
-          // This would be handled by ensuring the ID belongs to the tenant
-          // In practice, you'd modify the query to include tenant check
         },
       },
       create: {
@@ -126,15 +117,7 @@ export function createUsersService(
           if (!ctx.auth.user?.tenantId) {
             throw new Error('User must have a tenant ID')
           }
-          // Ensure created records belong to the user's tenant
           ctx.data.tenantId = ctx.auth.user.tenantId
-          ctx.data.createdAt = new Date().toISOString()
-          ctx.data.updatedAt = new Date().toISOString()
-        },
-      },
-      update: {
-        before: async (ctx: any) => {
-          ctx.data.updatedAt = new Date().toISOString()
         },
       },
     },
@@ -156,31 +139,24 @@ export default {
     // Initialize the service with the database binding and encryption keys
     const usersService = createService({
       table: 'users',
-      db: env.DB, // Cloudflare D1 binding
+      db: env.DB,
       rowSchema: UserRowSchema,
       createSchema: UserCreateSchema,
       updateSchema: UserUpdateSchema,
       joins: userJoins,
       secrets: userSecrets,
-      encryptionKeys, // Pass encryption keys directly
+      encryptionKeys,
+      timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' },
       hooks: {
-        // Enforce tenant filtering on all operations
         list: {
           before: async (ctx: any) => {
             if (!ctx.auth.user?.tenantId) {
               throw new Error('User must have a tenant ID')
             }
-            // Add tenant filter to where clause
             if (!ctx.params.where) {
               ctx.params.where = {}
             }
             ctx.params.where.tenantId = ctx.auth.user.tenantId
-
-            // For joins that need tenant filtering, you can:
-            // 1. Ensure proper foreign key relationships in your database schema
-            // 2. Use additional where clauses on the main query
-            // 3. Implement custom filtering logic in hooks
-            // The join definitions remain clean and auth-agnostic
           },
         },
         create: {
@@ -188,10 +164,7 @@ export default {
             if (!ctx.auth.user?.tenantId) {
               throw new Error('User must have a tenant ID')
             }
-            // Ensure created records belong to the user's tenant
             ctx.data.tenantId = ctx.auth.user.tenantId
-            ctx.data.createdAt = new Date().toISOString()
-            ctx.data.updatedAt = new Date().toISOString()
           },
         },
       },

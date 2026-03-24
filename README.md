@@ -134,6 +134,7 @@ function createUsersService(
     joins: userJoins,
     secrets: userSecrets,
     encryptionKeys,
+    timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' },
     hooks: {
       list: {
         before: async (ctx: any) => {
@@ -266,6 +267,7 @@ const service = createService({
   deps: { teams: teamsService }, // other services
   primaryKey: 'id', // default "id"
   defaultOrderBy: { column: 'created_at', direction: 'desc' },
+  timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' },
   keyProvider: customProvider, // or pass encryptionKeys: { ... }
 })
 ```

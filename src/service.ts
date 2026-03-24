@@ -72,6 +72,7 @@ export class Service<
   public readonly timestamps: TimestampConfig | undefined
 
   private readonly hooks: Partial<HookMap<BaseCtx>>
+  private readonly secretKeysToStrip: Set<string>
 
   constructor(
     options: ServiceOptions<TRow, TCreate, TUpdate, TJoins, TSecrets>,
@@ -91,6 +92,65 @@ export class Service<
     this.keyProvider =
       options.keyProvider ||
       new DefaultKeyProvider(options.encryptionKeys || {})
+
+    this.secretKeysToStrip = new Set<string>()
+    if (this.secrets) {
+      for (const s of this.secrets) {
+        this.secretKeysToStrip.add(s.columnName)
+        this.secretKeysToStrip.add(s.logicalName)
+      }
+    }
+
+    this.validateSecretsNotInRowSchema()
+  }
+
+  private stripSecretKeys(
+    row: Record<string, unknown>,
+  ): Record<string, unknown> {
+    if (this.secretKeysToStrip.size === 0) return row
+    const cleaned = { ...row }
+    for (const key of this.secretKeysToStrip) {
+      delete cleaned[key]
+    }
+    return cleaned
+  }
+
+  private extractSecretFields(
+    row: Record<string, unknown>,
+  ): Record<string, unknown> {
+    if (!this.secrets) return {}
+    const fields: Record<string, unknown> = {}
+    for (const s of this.secrets) {
+      if (row[s.logicalName] !== undefined) {
+        fields[s.logicalName] = row[s.logicalName]
+      }
+    }
+    return fields
+  }
+
+  private validateSecretsNotInRowSchema(): void {
+    if (!this.secrets) return
+
+    const shape = (this.rowSchema as any).shape
+    if (!shape || typeof shape !== 'object') return
+
+    const schemaKeys = new Set(Object.keys(shape))
+
+    for (const secret of this.secrets) {
+      if (schemaKeys.has(secret.columnName)) {
+        throw new ValidationError(
+          `Secret column '${secret.columnName}' (columnName) should not be in rowSchema — ` +
+            `secret fields are managed separately via the secrets config. Remove it from rowSchema.`,
+        )
+      }
+      if (schemaKeys.has(secret.logicalName)) {
+        throw new ValidationError(
+          `Secret field '${secret.logicalName}' (logicalName) should not be in rowSchema — ` +
+            `when includeSecrets is true, it is automatically added to the result after decryption. ` +
+            `Remove it from rowSchema.`,
+        )
+      }
+    }
   }
 
   /**
@@ -201,10 +261,17 @@ export class Service<
       // Process joins
       const processedRows = this.processJoinedRows(rows, include)
 
-      // Validate rows
-      const validatedRows = processedRows.map((row) =>
-        this.rowSchema.parse(row),
-      )
+      // Validate rows (strip secret keys to avoid Zod failures on unknown fields)
+      const validatedRows = processedRows.map((row) => {
+        const r = row as Record<string, unknown>
+        const validated = this.rowSchema.parse(this.stripSecretKeys(r))
+        return includeSecrets
+          ? {
+              ...(validated as Record<string, unknown>),
+              ...this.extractSecretFields(r),
+            }
+          : validated
+      })
 
       // Generate cursors
       let nextCursor: string | undefined
@@ -300,10 +367,14 @@ export class Service<
         processedRow = await this.fetchOneToManyJoins(processedRow, include, id)
       }
 
-      // Validate row (but preserve join data)
-      const baseRow = this.rowSchema.parse(row) as Record<string, unknown>
+      // Validate row (strip secret keys to avoid Zod failures on unknown fields)
+      const baseRow = this.rowSchema.parse(this.stripSecretKeys(row)) as Record<
+        string,
+        unknown
+      >
       const validatedRow = {
         ...baseRow,
+        ...(includeSecrets ? this.extractSecretFields(row) : {}),
         ...this.extractJoinData(processedRow, include),
       }
 

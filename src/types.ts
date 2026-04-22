@@ -124,15 +124,68 @@ export interface OrderBy {
 }
 
 /**
+ * Field selection for read methods.
+ *
+ * Use a flat array of column names to project the result to a subset of the
+ * row schema. To select columns from a configured join, use `$alias.column`
+ * notation (mirrors the alias-block syntax used by `where`):
+ *
+ * @example
+ * ```ts
+ * service.list({
+ *   auth,
+ *   select: ['id', 'name', '$teams.id', '$teams.name'],
+ *   include: { teams: true },
+ * })
+ * ```
+ *
+ * Notes:
+ * - The primary key and any `orderBy` columns are always included internally
+ *   (and surfaced in the returned row) so cursor pagination keeps working.
+ * - `select` is independent of `includeSecrets`; secrets are still controlled
+ *   exclusively by the `includeSecrets` flag.
+ * - `$alias.column` selects the given column from the joined table. A bare
+ *   `$alias` token expands to all columns configured in the join's
+ *   `remote.select`. The join must also be enabled via `include[alias] = true`.
+ * - Pass the array `as const` (or rely on the `<const>` type parameter) to
+ *   narrow the return type to `Pick<Row, …>`.
+ */
+export type SelectField = string
+
+/**
+ * Narrow a row type based on the columns chosen via `select`.
+ *
+ * - When `TSelect` is omitted/undefined → returns the full row.
+ * - When `TSelect` is a tuple (preserved by the `<const>` type parameter on
+ *   service methods) → returns `Pick<Row, …non-$tokens…>`.
+ * - When `TSelect` widens to `string[]` (e.g. user did not pass `as const` and
+ *   compiler couldn't preserve the tuple) → falls back to the full row.
+ *
+ * `$alias.column` and bare `$alias` tokens are stripped from the picked keys
+ * because join columns live on the join object, not on the row itself.
+ */
+export type SelectedRow<
+  TRow,
+  TSelect extends readonly SelectField[] | undefined,
+> = TSelect extends readonly SelectField[]
+  ? string[] extends TSelect
+    ? TRow
+    : Pick<TRow, Extract<Exclude<TSelect[number], `$${string}`>, keyof TRow>>
+  : TRow
+
+/**
  * Pagination parameters
  */
-export interface ListParams {
+export interface ListParams<
+  TSelect extends readonly SelectField[] | undefined = undefined,
+> {
   cursor?: string
   limit?: number
   orderBy?: OrderBy[]
   where?: Record<string, unknown>
   include?: Record<string, boolean>
   includeSecrets?: boolean
+  select?: TSelect
 }
 
 /**
@@ -154,25 +207,34 @@ export interface CountParams {
 /**
  * Get parameters
  */
-export interface GetParams {
+export interface GetParams<
+  TSelect extends readonly SelectField[] | undefined = undefined,
+> {
   include?: Record<string, boolean>
   includeSecrets?: boolean
+  select?: TSelect
 }
 
 /**
  * Create parameters
  */
-export interface CreateParams {
+export interface CreateParams<
+  TSelect extends readonly SelectField[] | undefined = undefined,
+> {
   include?: Record<string, boolean>
   includeSecrets?: boolean
+  select?: TSelect
 }
 
 /**
  * Update parameters
  */
-export interface UpdateParams {
+export interface UpdateParams<
+  TSelect extends readonly SelectField[] | undefined = undefined,
+> {
   include?: Record<string, boolean>
   includeSecrets?: boolean
+  select?: TSelect
 }
 
 /**
@@ -257,30 +319,40 @@ export interface BaseService<
   TJoins extends Record<string, JoinDef>,
   _TSecrets extends readonly SecretFieldDef[] | undefined,
 > {
-  list(
-    params?: ListParams & MethodOptions,
+  list<const TSelect extends readonly SelectField[] | undefined = undefined>(
+    params?: ListParams<TSelect> & MethodOptions,
   ): Promise<
-    ListResult<z.infer<TRow> & ComputeJoins<TJoins, ListParams['include']>>
+    ListResult<
+      SelectedRow<z.infer<TRow>, TSelect> &
+        ComputeJoins<TJoins, ListParams['include']>
+    >
   >
 
-  get(
+  get<const TSelect extends readonly SelectField[] | undefined = undefined>(
     id: string | number,
-    opts?: GetParams & MethodOptions,
+    opts?: GetParams<TSelect> & MethodOptions,
   ): Promise<
-    (z.infer<TRow> & ComputeJoins<TJoins, GetParams['include']>) | null
+    | (SelectedRow<z.infer<TRow>, TSelect> &
+        ComputeJoins<TJoins, GetParams['include']>)
+    | null
   >
 
-  create(
+  create<const TSelect extends readonly SelectField[] | undefined = undefined>(
     data: z.infer<TCreate>,
-    opts?: CreateParams & MethodOptions,
-  ): Promise<z.infer<TRow> & ComputeJoins<TJoins, CreateParams['include']>>
+    opts?: CreateParams<TSelect> & MethodOptions,
+  ): Promise<
+    SelectedRow<z.infer<TRow>, TSelect> &
+      ComputeJoins<TJoins, CreateParams['include']>
+  >
 
-  update(
+  update<const TSelect extends readonly SelectField[] | undefined = undefined>(
     id: string | number,
     data: Partial<z.infer<TUpdate>>,
-    opts?: UpdateParams & MethodOptions,
+    opts?: UpdateParams<TSelect> & MethodOptions,
   ): Promise<
-    (z.infer<TRow> & ComputeJoins<TJoins, UpdateParams['include']>) | null
+    | (SelectedRow<z.infer<TRow>, TSelect> &
+        ComputeJoins<TJoins, UpdateParams['include']>)
+    | null
   >
 
   delete(

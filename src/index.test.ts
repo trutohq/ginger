@@ -1061,6 +1061,333 @@ describe('Ginger Library - Comprehensive Tests', () => {
     })
   })
 
+  describe('Field selection (select)', () => {
+    let serviceWithJoins: Service<any, any, any, any, any>
+    let serviceWithSecrets: Service<any, any, any, any, any>
+
+    beforeEach(() => {
+      serviceWithJoins = createService({
+        table: 'users',
+        db,
+        rowSchema: UserRowSchema,
+        createSchema: UserCreateSchema,
+        updateSchema: UserUpdateSchema,
+        joins: userJoins,
+        timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' },
+        encryptionKeys: { default: testSecretKey },
+      })
+
+      serviceWithSecrets = createService({
+        table: 'users',
+        db,
+        rowSchema: UserRowSchema,
+        createSchema: UserCreateSchema,
+        updateSchema: UserUpdateSchema,
+        secrets: userSecrets,
+        timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' },
+        encryptionKeys: {
+          default: testSecretKey,
+          'user-secrets': testSecretKey,
+        },
+      })
+    })
+
+    describe('main row select', () => {
+      it('returns only requested columns from get()', async () => {
+        const user = await serviceWithJoins.get(1, {
+          auth: {},
+          select: ['id', 'name'],
+        })
+        expect(user).toEqual({ id: 1, name: 'John Doe' })
+      })
+
+      it('returns only requested columns from list()', async () => {
+        const page = await serviceWithJoins.list({
+          auth: {},
+          select: ['id', 'email'],
+          orderBy: [{ column: 'id', direction: 'asc' }],
+        })
+        expect(page.result).toEqual([
+          { id: 1, email: 'john@test.com' },
+          { id: 2, email: 'jane@test.com' },
+          { id: 3, email: 'bob@test.com' },
+        ])
+      })
+
+      it('always silently includes the primary key even when omitted from select', async () => {
+        const user = await serviceWithJoins.get(1, {
+          auth: {},
+          select: ['name'],
+        })
+        expect(user).toEqual({ id: 1, name: 'John Doe' })
+      })
+
+      it('always silently includes orderBy columns so cursor pagination keeps working', async () => {
+        const page1 = await serviceWithJoins.list({
+          auth: {},
+          select: ['name'],
+          orderBy: [{ column: 'created_at', direction: 'asc' }],
+          limit: 1,
+        })
+        expect(page1.result).toEqual([
+          {
+            id: 1,
+            name: 'John Doe',
+            created_at: '2024-01-01T00:00:00Z',
+          },
+        ])
+        expect(page1.nextCursor).toBeDefined()
+
+        const page2 = await serviceWithJoins.list({
+          auth: {},
+          select: ['name'],
+          cursor: page1.nextCursor,
+          limit: 1,
+        })
+        expect(page2.result).toEqual([
+          {
+            id: 2,
+            name: 'Jane Smith',
+            created_at: '2024-01-02T00:00:00Z',
+          },
+        ])
+      })
+
+      it('throws ValidationError for unknown columns', async () => {
+        await expect(
+          serviceWithJoins.get(1, {
+            auth: {},
+            select: ['id', 'nope'],
+          }),
+        ).rejects.toThrow(ValidationError)
+      })
+
+      it('returns full row when select is omitted (backwards compatible)', async () => {
+        const user = await serviceWithJoins.get(1, { auth: {} })
+        expect(user).toMatchObject({
+          id: 1,
+          name: 'John Doe',
+          email: 'john@test.com',
+          tenant_id: 'tenant-1',
+        })
+      })
+
+      it('treats empty select array as undefined (full row)', async () => {
+        const user = await serviceWithJoins.get(1, {
+          auth: {},
+          select: [],
+        })
+        expect(user).toMatchObject({
+          id: 1,
+          name: 'John Doe',
+          email: 'john@test.com',
+        })
+      })
+
+      it('deduplicates repeated select tokens', async () => {
+        const user = await serviceWithJoins.get(1, {
+          auth: {},
+          select: ['id', 'name', 'name', 'id'],
+        })
+        expect(user).toEqual({ id: 1, name: 'John Doe' })
+      })
+    })
+
+    describe('$alias join column selection', () => {
+      it('selects specific columns from a one-to-one join', async () => {
+        const user = await serviceWithJoins.get(1, {
+          auth: {},
+          select: ['id', 'name', '$profile.bio'],
+          include: { profile: true },
+        })
+        expect(user).toEqual({
+          id: 1,
+          name: 'John Doe',
+          profile: {
+            bio: 'Software engineer',
+            user_id: 1, // PK silently included
+          },
+        })
+      })
+
+      it('selects specific columns from a one-to-many join (through table)', async () => {
+        const user = await serviceWithJoins.get(2, {
+          auth: {},
+          select: ['id', '$teams.name'],
+          include: { teams: true },
+        })
+        expect(user).toEqual({
+          id: 2,
+          teams: [
+            { id: 1, name: 'Team Alpha' },
+            { id: 2, name: 'Team Beta' },
+          ],
+        })
+      })
+
+      it('expands a bare $alias to all configured join columns', async () => {
+        const user = await serviceWithJoins.get(1, {
+          auth: {},
+          select: ['id', '$teams'],
+          include: { teams: true },
+        })
+        expect(user).toEqual({
+          id: 1,
+          teams: [{ id: 1, name: 'Team Alpha', description: 'First team' }],
+        })
+      })
+
+      it('throws when $alias.column is used without include[alias] = true', async () => {
+        await expect(
+          serviceWithJoins.get(1, {
+            auth: {},
+            select: ['id', '$teams.name'],
+          }),
+        ).rejects.toThrow(/include\.teams = true/)
+      })
+
+      it('throws ValidationError for unknown join alias', async () => {
+        await expect(
+          serviceWithJoins.get(1, {
+            auth: {},
+            select: ['id', '$nope.foo'],
+            include: { teams: true },
+          }),
+        ).rejects.toThrow(ValidationError)
+      })
+
+      it('works with list() + per-call join column selection', async () => {
+        const page = await serviceWithJoins.list({
+          auth: {},
+          select: ['id', '$profile.avatar'],
+          include: { profile: true },
+          orderBy: [{ column: 'id', direction: 'asc' }],
+          limit: 2,
+        })
+        expect(page.result).toEqual([
+          {
+            id: 1,
+            profile: { user_id: 1, avatar: 'avatar1.jpg' },
+          },
+          {
+            id: 2,
+            profile: { user_id: 2, avatar: 'avatar2.jpg' },
+          },
+        ])
+      })
+
+      it('does not strip main columns whose names share the join alias prefix', async () => {
+        // Regression: a previous projectRow implementation removed any key in
+        // the row whose name started with `${alias}_` to drop the SQL-aliased
+        // join columns. That accidentally also matched legitimate main
+        // columns. With the collision-free implementation, `team_size` must
+        // survive even though the join alias is `team` (so the SQL aliased
+        // join keys look like `team_id`, `team_name`, …).
+        bunDb.exec(`ALTER TABLE users ADD COLUMN team_size INTEGER DEFAULT 0`)
+        bunDb.exec(`UPDATE users SET team_size = 7 WHERE id = 1`)
+
+        const SchemaWithCollidingColumn = z.object({
+          id: z.number(),
+          name: z.string(),
+          email: z.string(),
+          tenant_id: z.string(),
+          team_size: z.number(),
+          created_at: z.string(),
+          updated_at: z.string().nullable().optional(),
+        })
+
+        const svc = createService({
+          table: 'users',
+          db,
+          rowSchema: SchemaWithCollidingColumn,
+          createSchema: SchemaWithCollidingColumn.partial(),
+          updateSchema: SchemaWithCollidingColumn.partial(),
+          joins: userJoins, // join alias is `team`
+          timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' },
+        })
+
+        const user = await svc.get(1, {
+          auth: {},
+          select: ['id', 'team_size', '$teams.name'],
+          include: { teams: true },
+        })
+
+        expect(user).toEqual({
+          id: 1,
+          team_size: 7,
+          teams: [{ id: 1, name: 'Team Alpha' }],
+        })
+      })
+    })
+
+    describe('interaction with secrets', () => {
+      beforeEach(async () => {
+        await serviceWithSecrets.create(
+          {
+            name: 'Secret User',
+            email: 'secret@test.com',
+            tenant_id: 'tenant-1',
+            apiKey: 'fake-test-secret-abcdefghijklmnopqrstuvwxyz',
+          },
+          { auth: {} },
+        )
+      })
+
+      it('returns a select-restricted row WITHOUT secrets when includeSecrets is false', async () => {
+        const user = await serviceWithSecrets.get(4, {
+          auth: {},
+          select: ['id', 'name'],
+        })
+        expect(user).toEqual({ id: 4, name: 'Secret User' })
+        expect((user as any).apiKey).toBeUndefined()
+      })
+
+      it('returns a select-restricted row WITH decrypted secret when includeSecrets is true', async () => {
+        const user = await serviceWithSecrets.get(4, {
+          auth: {},
+          select: ['id'],
+          includeSecrets: true,
+        })
+        expect(user).toEqual({
+          id: 4,
+          apiKey: 'fake-test-secret-abcdefghijklmnopqrstuvwxyz',
+        })
+      })
+
+      it('select does not allow listing secret column names directly', async () => {
+        await expect(
+          serviceWithSecrets.get(4, {
+            auth: {},
+            select: ['apiKey'],
+          }),
+        ).rejects.toThrow(ValidationError)
+      })
+    })
+
+    describe('create() and update() honour select', () => {
+      it('create() returns a projected record', async () => {
+        const created = await serviceWithJoins.create(
+          {
+            name: 'Carol Jones',
+            email: 'carol@test.com',
+            tenant_id: 'tenant-1',
+          },
+          { auth: {}, select: ['id', 'name'] },
+        )
+        expect(created).toEqual({ id: 4, name: 'Carol Jones' })
+      })
+
+      it('update() returns a projected record', async () => {
+        const updated = await serviceWithJoins.update(
+          1,
+          { name: 'John Renamed' },
+          { auth: {}, select: ['id', 'name'] },
+        )
+        expect(updated).toEqual({ id: 1, name: 'John Renamed' })
+      })
+    })
+  })
+
   describe('Hooks System', () => {
     it('should execute before hooks', async () => {
       const hookCalls: string[] = []

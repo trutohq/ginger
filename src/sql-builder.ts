@@ -3,7 +3,12 @@ import { SqlBuilderError } from './errors.js'
 import type { JoinDef, OrderBy } from './types.js'
 
 /**
- * Build a SELECT query with joins and pagination
+ * Build a SELECT query with joins and pagination.
+ *
+ * `joinColumnOverrides[joinName]` overrides the columns pulled from that
+ * join's remote table for this query only (instead of using the join's
+ * configured `remote.select`). The base service uses this to honour the
+ * caller's `select: ['$alias.col', ...]` request.
  */
 export function buildSelect(
   table: string,
@@ -12,6 +17,7 @@ export function buildSelect(
     where?: Record<string, unknown>
     joins?: Record<string, JoinDef>
     include?: Record<string, boolean>
+    joinColumnOverrides?: Record<string, string[]>
     orderBy?: OrderBy[]
     limit?: number
     offset?: number
@@ -30,12 +36,13 @@ export function buildSelect(
       selectColumns.push(sql`${sql.ident(table)}.*`)
     }
 
-    // Add join columns
     if (options.joins && options.include) {
       for (const [joinName, joinDef] of Object.entries(options.joins)) {
         if (options.include[joinName]) {
           const joinAlias = joinDef.remote.alias || joinName
-          const joinColumns = joinDef.remote.select.map(
+          const cols =
+            options.joinColumnOverrides?.[joinName] ?? joinDef.remote.select
+          const joinColumns = cols.map(
             (col) =>
               sql`${sql.ident(`${joinDef.remote.table}.${col}`)} as ${sql.ident(`${joinAlias}_${col}`)}`,
           )
@@ -276,6 +283,7 @@ export function buildSelectById(
     columns?: string[]
     joins?: Record<string, JoinDef>
     include?: Record<string, boolean>
+    joinColumnOverrides?: Record<string, string[]>
   } = {},
 ): ReturnType<typeof sql> {
   const where: Record<string, unknown> = {}

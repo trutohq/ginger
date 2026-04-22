@@ -49,6 +49,8 @@ export type {
   OrderDirection,
   QueryParams,
   SecretFieldDef,
+  SelectedRow,
+  SelectField,
   ServiceCreate,
   ServiceDeps,
   ServiceOptions,

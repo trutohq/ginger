@@ -21,6 +21,7 @@ bun add zod @truto/sqlite-builder
 - **Fully type-safe** — Zod schemas drive runtime validation and static types
 - **Cursor pagination** — opaque base64 cursors with `next` / `prev` support
 - **Declarative joins** — `one` and `many` joins with conditional `include`
+- **Field selection** — flat `select: ['id', 'name', '$teams.name']` array picks main-row and join columns, with type narrowing
 - **Field encryption** — AES-256-GCM via Web Crypto, stored as `kid:iv:cipher`
 - **Hook system** — `before` / `after` / `error` hooks per method, inspired by Feathers.js
 - **Dependency injection** — pass other services via `deps` for cross-service logic
@@ -363,6 +364,63 @@ const user = await service.get(id, {
 // user.profile → ProfileRow | null
 // user.teams   → TeamRow[]
 ```
+
+### Field selection
+
+Limit the columns returned by `list` / `get` / `create` / `update` with a flat
+`select` array. Tokens beginning with `$alias` (mirroring the alias-block
+syntax used by `where`) pick columns from a configured join.
+
+```typescript
+// Main row only — pick a subset of the row schema
+const slim = await usersService.get(1, {
+  auth,
+  select: ['id', 'name'],
+})
+// → { id: 1, name: 'Jane' }
+
+// Mix main-row columns with join columns using `$alias.col`
+const withTeam = await usersService.get(1, {
+  auth,
+  include: { teams: true },
+  select: ['id', 'name', '$teams.name'],
+})
+// → { id: 1, name: 'Jane', teams: [{ id: 7, name: 'Eng' }, ...] }
+
+// Bare `$alias` expands to all columns in that join's `remote.select`
+const withFullTeams = await usersService.get(1, {
+  auth,
+  include: { teams: true },
+  select: ['id', '$teams'],
+})
+
+// Cursor pagination keeps working — orderBy columns are silently included
+const page = await usersService.list({
+  auth,
+  select: ['name'],
+  orderBy: [{ column: 'created_at', direction: 'asc' }],
+  limit: 20,
+})
+// page.result[0] → { id: 1, name: 'Jane', created_at: '...' }
+```
+
+Behaviour summary:
+
+| Aspect                       | Behaviour                                                                                                                                                                                                   |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Primary key                  | Always silently included in SELECT and kept in the returned row                                                                                                                                             |
+| `orderBy` columns            | Always silently included so `nextCursor` / `prevCursor` keep working                                                                                                                                        |
+| Join columns                 | Use `$alias.column` (per-call override) or `$alias` (use the join's configured `remote.select`). The join must also be enabled via `include[alias] = true` — selection alone does not auto-include.         |
+| Join column scope            | A per-call `$alias.column` may reference any column on the joined table (not just the configured `remote.select`). The join's PK is silently included.                                                      |
+| `includeSecrets`             | Independent from `select`. Secrets are surfaced only when `includeSecrets: true`, irrespective of what's in `select`. Secret `logicalName`s are not valid `select` tokens — use `includeSecrets` to opt in. |
+| Validation                   | Unknown columns and unknown join aliases throw `ValidationError`. Empty/omitted `select` returns the full row (backwards compatible).                                                                       |
+| `count` / `delete` / `query` | Do not accept `select` (they don't return rows in the same shape).                                                                                                                                          |
+
+Type narrowing — pass the array `as const` (or rely on the `<const>` type
+parameter on the service methods) to get `Pick<Row, …>` in the return type.
+Per-call join column overrides currently don't narrow the join schema in
+types — at the type level the join still appears with its full configured
+schema; at runtime the row only contains what was selected.
 
 ### Field encryption
 

@@ -42,10 +42,22 @@ import type {
   OrderBy,
   QueryParams,
   SecretFieldDef,
+  SelectedRow,
+  SelectField,
   ServiceOptions,
   TimestampConfig,
   UpdateParams,
 } from './types.js'
+
+/**
+ * Result of parsing a `select` array into main-row columns and per-join
+ * column overrides. `'*'` for a join means "use the join's configured
+ * `remote.select`" (triggered by a bare `$alias` token in the select).
+ */
+interface ParsedSelect {
+  mainColumns: string[]
+  joinColumns: Record<string, string[] | '*'>
+}
 
 /**
  * Main service class that provides type-safe data access for SQLite databases
@@ -128,6 +140,169 @@ export class Service<
     return fields
   }
 
+  /**
+   * Parse a `select` array into main-row columns and per-join column overrides.
+   *
+   * Tokens:
+   * - `'col'`            → main row column
+   * - `'$alias.col'`     → column from the join named `alias`
+   * - `'$alias'`         → all configured columns for the join named `alias`
+   *
+   * Validates that:
+   * - Main columns exist in the row schema (when shape is available).
+   * - `$alias` references a configured join AND the join is enabled via
+   *   `include[alias] = true`. We require explicit include so the return
+   *   type (which is keyed off `include`) stays accurate.
+   */
+  private parseSelect(
+    select: readonly SelectField[] | undefined,
+    include: Record<string, boolean>,
+  ): ParsedSelect | undefined {
+    if (!select || select.length === 0) return undefined
+
+    const mainSet = new Set<string>()
+    const joinAcc: Record<string, Set<string> | '*'> = {}
+    const allowedMain = this.getSchemaColumns()
+    const wildcard = allowedMain.length === 1 && allowedMain[0] === '*'
+    const joinNames = this.joins ? new Set(Object.keys(this.joins)) : new Set()
+
+    for (const raw of select) {
+      if (typeof raw !== 'string' || raw.length === 0) {
+        throw new ValidationError(
+          `Invalid select token: ${JSON.stringify(raw)}. Expected a non-empty string.`,
+        )
+      }
+
+      if (raw.startsWith('$')) {
+        const body = raw.slice(1)
+        const dot = body.indexOf('.')
+        const alias = dot === -1 ? body : body.slice(0, dot)
+        const column = dot === -1 ? undefined : body.slice(dot + 1)
+
+        if (!alias) {
+          throw new ValidationError(
+            `Invalid select token "${raw}": missing alias name after '$'.`,
+          )
+        }
+        if (!joinNames.has(alias)) {
+          throw new ValidationError(
+            `Unknown join alias "${alias}" in select token "${raw}". Configured joins: ${
+              Array.from(joinNames).join(', ') || '<none>'
+            }.`,
+          )
+        }
+        if (!include[alias]) {
+          throw new ValidationError(
+            `select token "${raw}" requires include.${alias} = true.`,
+          )
+        }
+        if (column === undefined) {
+          joinAcc[alias] = '*'
+        } else if (!column) {
+          throw new ValidationError(
+            `Invalid select token "${raw}": missing column name after '$${alias}.'.`,
+          )
+        } else {
+          const existing = joinAcc[alias]
+          if (existing === '*') {
+            // already wildcard; keep wildcard
+            continue
+          }
+          if (!existing) {
+            joinAcc[alias] = new Set([column])
+          } else {
+            existing.add(column)
+          }
+        }
+        continue
+      }
+
+      if (!wildcard && !allowedMain.includes(raw)) {
+        throw new ValidationError(
+          `Unknown column "${raw}" in select. Allowed columns: ${allowedMain.join(
+            ', ',
+          )}.`,
+        )
+      }
+      mainSet.add(raw)
+    }
+
+    const joinColumns: Record<string, string[] | '*'> = {}
+    for (const [alias, value] of Object.entries(joinAcc)) {
+      joinColumns[alias] = value === '*' ? '*' : Array.from(value)
+    }
+
+    return {
+      mainColumns: Array.from(mainSet),
+      joinColumns,
+    }
+  }
+
+  /**
+   * Compute the effective list of columns to SELECT from the main table.
+   *
+   * The user's main-row select is augmented with the primary key columns and
+   * any `orderBy` columns so cursor pagination keeps working and so the
+   * canonical record is always identifiable. These extras are kept in the
+   * returned row (per the design choice "silently include and keep").
+   */
+  private resolveMainColumns(
+    parsed: ParsedSelect | undefined,
+    orderBy: OrderBy[],
+    includeSecrets: boolean,
+  ): string[] | undefined {
+    if (!parsed) return this.getSelectColumns(includeSecrets)
+
+    const out = new Set<string>(parsed.mainColumns)
+
+    for (const pk of Array.isArray(this.primaryKey)
+      ? this.primaryKey
+      : [this.primaryKey]) {
+      out.add(pk)
+    }
+    for (const order of orderBy) {
+      out.add(order.column)
+    }
+
+    if (includeSecrets && this.secrets) {
+      for (const s of this.secrets) {
+        out.add(s.columnName)
+      }
+    }
+
+    return Array.from(out)
+  }
+
+  /**
+   * Compute the effective per-join column override map.
+   *
+   * For each enabled join: if the user asked for specific columns via
+   * `$alias.col`, use those; if they used a bare `$alias`, fall back to the
+   * join's configured `remote.select`. Joins with no override aren't returned
+   * (so `buildSelect` keeps using the configured select for them).
+   *
+   * The join's PK is silently included so `processJoinedRows` can detect the
+   * presence of related data.
+   */
+  private resolveJoinOverrides(
+    parsed: ParsedSelect | undefined,
+    include: Record<string, boolean>,
+  ): Record<string, string[]> | undefined {
+    if (!parsed || !this.joins) return undefined
+
+    const overrides: Record<string, string[]> = {}
+    for (const [alias, value] of Object.entries(parsed.joinColumns)) {
+      if (!include[alias]) continue
+      const def = this.joins[alias]
+      if (!def) continue
+      if (value === '*') continue // use configured remote.select
+      const cols = new Set<string>(value)
+      cols.add(def.remote.pk)
+      overrides[alias] = Array.from(cols)
+    }
+    return Object.keys(overrides).length > 0 ? overrides : undefined
+  }
+
   private validateSecretsNotInRowSchema(): void {
     if (!this.secrets) return
 
@@ -156,10 +331,15 @@ export class Service<
   /**
    * List records with cursor-based pagination
    */
-  async list(
-    params: ListParams & MethodOptions = { auth: {} },
+  async list<
+    const TSelect extends readonly SelectField[] | undefined = undefined,
+  >(
+    params: ListParams<TSelect> & MethodOptions = { auth: {} },
   ): Promise<
-    ListResult<z.infer<TRow> & ComputeJoins<TJoins, ListParams['include']>>
+    ListResult<
+      SelectedRow<z.infer<TRow>, TSelect> &
+        ComputeJoins<TJoins, ListParams['include']>
+    >
   > {
     const ctx: BaseCtx = {
       auth: params.auth,
@@ -179,6 +359,7 @@ export class Service<
         where = {},
         include = {},
         includeSecrets = false,
+        select,
       } = params
 
       // Validate limit
@@ -224,15 +405,24 @@ export class Service<
         }
       }
 
-      // Get columns to select (excluding secret columns if not requested)
-      const columns = this.getSelectColumns(includeSecrets)
+      const parsedSelect = this.parseSelect(select, include)
+      const columns = this.resolveMainColumns(
+        parsedSelect,
+        orderBy,
+        includeSecrets,
+      )
+      const joinColumnOverrides = this.resolveJoinOverrides(
+        parsedSelect,
+        include,
+      )
 
       // Build and execute query
       const { text: query, values: sqlParams } = buildSelect(this.table, {
-        columns,
+        ...(columns ? { columns } : {}),
         where,
         ...(this.joins ? { joins: this.joins } : {}),
         include,
+        ...(joinColumnOverrides ? { joinColumnOverrides } : {}),
         orderBy,
         limit: actualLimit,
         ...(cursorConditions ? { cursorConditions } : {}),
@@ -258,12 +448,22 @@ export class Service<
         rows = await Promise.all(rows.map((row) => this.decryptRowSecrets(row)))
       }
 
-      // Process joins
-      const processedRows = this.processJoinedRows(rows, include)
+      // Process joins (honour per-call join column overrides)
+      const processedRows = this.processJoinedRows(
+        rows,
+        include,
+        joinColumnOverrides,
+      )
 
-      // Validate rows (strip secret keys to avoid Zod failures on unknown fields)
+      // Validate rows. When `select` is provided we project to the requested
+      // subset and skip full schema validation (Zod would fail on missing
+      // required fields). PK + orderBy columns are always present because
+      // resolveMainColumns added them.
       const validatedRows = processedRows.map((row) => {
         const r = row as Record<string, unknown>
+        if (parsedSelect) {
+          return this.projectRow(r, include, includeSecrets)
+        }
         const validated = this.rowSchema.parse(this.stripSecretKeys(r))
         return includeSecrets
           ? {
@@ -309,11 +509,15 @@ export class Service<
   /**
    * Get a single record by ID
    */
-  async get(
+  async get<
+    const TSelect extends readonly SelectField[] | undefined = undefined,
+  >(
     id: string | number,
-    opts: GetParams & MethodOptions = { auth: {} },
+    opts: GetParams<TSelect> & MethodOptions = { auth: {} },
   ): Promise<
-    (z.infer<TRow> & ComputeJoins<TJoins, GetParams['include']>) | null
+    | (SelectedRow<z.infer<TRow>, TSelect> &
+        ComputeJoins<TJoins, GetParams['include']>)
+    | null
   > {
     const ctx: BaseCtx = {
       auth: opts.auth,
@@ -326,10 +530,14 @@ export class Service<
     try {
       await this.runHooks('before', 'get', ctx)
 
-      const { include = {}, includeSecrets = false } = opts
+      const { include = {}, includeSecrets = false, select } = opts
 
-      // Get columns to select
-      const columns = this.getSelectColumns(includeSecrets)
+      const parsedSelect = this.parseSelect(select, include)
+      const columns = this.resolveMainColumns(parsedSelect, [], includeSecrets)
+      const joinColumnOverrides = this.resolveJoinOverrides(
+        parsedSelect,
+        include,
+      )
 
       // Build and execute query
       const { text: query, values: params } = buildSelectById(
@@ -337,9 +545,10 @@ export class Service<
         this.primaryKey,
         id,
         {
-          columns,
+          ...(columns ? { columns } : {}),
           ...(this.joins ? { joins: this.joins } : {}),
           include,
+          ...(joinColumnOverrides ? { joinColumnOverrides } : {}),
         },
       )
 
@@ -359,23 +568,40 @@ export class Service<
         row = await this.decryptRowSecrets(row)
       }
 
-      // Process joins
-      let processedRow = this.processJoinedRows([row], include)[0]!
+      // Process joins (honour per-call join column overrides)
+      let processedRow = this.processJoinedRows(
+        [row],
+        include,
+        joinColumnOverrides,
+      )[0]!
 
       // Handle one-to-many joins with separate queries
       if (this.joins && Object.keys(include).length > 0) {
-        processedRow = await this.fetchOneToManyJoins(processedRow, include, id)
+        processedRow = await this.fetchOneToManyJoins(
+          processedRow,
+          include,
+          id,
+          joinColumnOverrides,
+        )
       }
 
-      // Validate row (strip secret keys to avoid Zod failures on unknown fields)
-      const baseRow = this.rowSchema.parse(this.stripSecretKeys(row)) as Record<
-        string,
-        unknown
-      >
-      const validatedRow = {
-        ...baseRow,
-        ...(includeSecrets ? this.extractSecretFields(row) : {}),
-        ...this.extractJoinData(processedRow, include),
+      // When `select` was provided, project to the requested subset rather
+      // than running Zod validation (which would fail on missing required
+      // fields). Otherwise validate the full row through the schema.
+      let validatedRow: Record<string, unknown>
+      if (parsedSelect) {
+        // processedRow already has aliased join keys removed and join data
+        // attached via processJoinedRows + fetchOneToManyJoins.
+        validatedRow = this.projectRow(processedRow, include, includeSecrets)
+      } else {
+        const baseRow = this.rowSchema.parse(
+          this.stripSecretKeys(row),
+        ) as Record<string, unknown>
+        validatedRow = {
+          ...baseRow,
+          ...(includeSecrets ? this.extractSecretFields(row) : {}),
+          ...this.extractJoinData(processedRow, include),
+        }
       }
 
       ctx.result = validatedRow
@@ -392,10 +618,15 @@ export class Service<
   /**
    * Create a new record
    */
-  async create(
+  async create<
+    const TSelect extends readonly SelectField[] | undefined = undefined,
+  >(
     data: z.infer<TCreate>,
-    opts: CreateParams & MethodOptions = { auth: {} },
-  ): Promise<z.infer<TRow> & ComputeJoins<TJoins, CreateParams['include']>> {
+    opts: CreateParams<TSelect> & MethodOptions = { auth: {} },
+  ): Promise<
+    SelectedRow<z.infer<TRow>, TSelect> &
+      ComputeJoins<TJoins, CreateParams['include']>
+  > {
     const ctx: BaseCtx = {
       auth: opts.auth,
       db: this.db,
@@ -408,7 +639,7 @@ export class Service<
     try {
       await this.runHooks('before', 'create', ctx)
 
-      const { include = {}, includeSecrets = false } = opts
+      const { include = {}, includeSecrets = false, select } = opts
 
       // Validate input data
       const validatedData = this.createSchema.parse(data) as Record<
@@ -461,11 +692,15 @@ export class Service<
         ? Object.fromEntries(this.primaryKey.map((k) => [k, inserted[k]]))
         : (inserted[this.primaryKey] as string | number)
 
-      const createdRecord = await this.get(insertId as string | number, {
-        include,
-        includeSecrets,
-        auth: opts.auth,
-      })
+      const createdRecord = await this.get(
+        insertId as string | number,
+        {
+          include,
+          includeSecrets,
+          ...(select ? { select } : {}),
+          auth: opts.auth,
+        } as GetParams<TSelect> & MethodOptions,
+      )
 
       if (!createdRecord) {
         throw new DatabaseError('Failed to retrieve created record')
@@ -474,7 +709,7 @@ export class Service<
       ctx.result = createdRecord
       await this.runHooks('after', 'create', ctx)
 
-      return createdRecord
+      return createdRecord as any
     } catch (error) {
       ctx.error = error as Error
       await this.runHooks('error', 'create', ctx)
@@ -485,12 +720,16 @@ export class Service<
   /**
    * Update a record by ID
    */
-  async update(
+  async update<
+    const TSelect extends readonly SelectField[] | undefined = undefined,
+  >(
     id: string | number,
     data: Partial<z.infer<TUpdate>>,
-    opts: UpdateParams & MethodOptions = { auth: {} },
+    opts: UpdateParams<TSelect> & MethodOptions = { auth: {} },
   ): Promise<
-    (z.infer<TRow> & ComputeJoins<TJoins, UpdateParams['include']>) | null
+    | (SelectedRow<z.infer<TRow>, TSelect> &
+        ComputeJoins<TJoins, UpdateParams['include']>)
+    | null
   > {
     const ctx: BaseCtx = {
       auth: opts.auth,
@@ -504,7 +743,7 @@ export class Service<
     try {
       await this.runHooks('before', 'update', ctx)
 
-      const { include = {}, includeSecrets = false } = opts
+      const { include = {}, includeSecrets = false, select } = opts
 
       // Check if record exists
       const existingRecord = await this.get(id, { auth: opts.auth })
@@ -558,13 +797,14 @@ export class Service<
       const updatedRecord = await this.get(id, {
         include,
         includeSecrets,
+        ...(select ? { select } : {}),
         auth: opts.auth,
-      })
+      } as GetParams<TSelect> & MethodOptions)
 
       ctx.result = updatedRecord
       await this.runHooks('after', 'update', ctx)
 
-      return updatedRecord
+      return updatedRecord as any
     } catch (error) {
       ctx.error = error as Error
       await this.runHooks('error', 'update', ctx)
@@ -814,11 +1054,53 @@ export class Service<
   }
 
   /**
+   * Project a processed row down to the caller-requested subset.
+   *
+   * Callers must pass a row that has already been through
+   * `processJoinedRows` (and, for `get()`, `fetchOneToManyJoins`). That means
+   * it contains exactly:
+   *   parsed.mainColumns + primary key + orderBy + secret columns
+   *   + nested join data under each join key (object | array | null).
+   *
+   * Here we only need to:
+   *   1. Drop the raw secret column names (e.g. `api_key_encrypted`) — those
+   *      are surfaced under the logicalName when `includeSecrets` is true.
+   *   2. Merge in decrypted logical secrets when `includeSecrets` is true.
+   *
+   * Zod validation is intentionally skipped — selecting a subset would
+   * otherwise fail required-field checks.
+   *
+   * The `include` parameter is currently unused but kept on the signature
+   * for symmetry with other helpers and to make future per-join projection
+   * easy to thread in.
+   */
+  private projectRow(
+    row: Record<string, unknown>,
+    _include: Record<string, boolean>,
+    includeSecrets: boolean,
+  ): Record<string, unknown> {
+    const out: Record<string, unknown> = { ...row }
+
+    if (this.secrets) {
+      for (const s of this.secrets) {
+        delete out[s.columnName]
+      }
+    }
+
+    if (includeSecrets) {
+      Object.assign(out, this.extractSecretFields(row))
+    }
+
+    return out
+  }
+
+  /**
    * Process joined rows by extracting join data
    */
   private processJoinedRows(
     rows: Record<string, unknown>[],
     include: Record<string, boolean>,
+    joinColumnOverrides?: Record<string, string[]>,
   ): Record<string, unknown>[] {
     if (!this.joins || Object.keys(include).length === 0) {
       return rows
@@ -836,8 +1118,9 @@ export class Service<
         const joinData: Record<string, unknown> = {}
         const keysToRemove: string[] = []
 
-        // Extract join columns
-        for (const column of joinDef.remote.select) {
+        const effectiveCols =
+          joinColumnOverrides?.[joinName] ?? joinDef.remote.select
+        for (const column of effectiveCols) {
           const aliasedKey = `${joinAlias}_${column}`
           if (aliasedKey in row) {
             joinData[column] = row[aliasedKey]
@@ -897,6 +1180,7 @@ export class Service<
     processedRow: Record<string, unknown>,
     include: Record<string, boolean>,
     mainRecordId: string | number,
+    joinColumnOverrides?: Record<string, string[]>,
   ): Promise<Record<string, unknown>> {
     if (!this.joins) return processedRow
 
@@ -907,8 +1191,11 @@ export class Service<
 
       let relatedRecords: any[] = []
 
+      const effectiveCols =
+        joinColumnOverrides?.[joinName] ?? joinDef.remote.select
+
       if (joinDef.through) {
-        const selectColumns = joinDef.remote.select.map(
+        const selectColumns = effectiveCols.map(
           (col) => sql`${sql.ident(`${joinDef.remote.table}.${col}`)}`,
         )
         const query = sql`SELECT ${sql.join(selectColumns, ', ')}
@@ -924,9 +1211,7 @@ export class Service<
           relatedRecords = queryResult.results as any[]
         }
       } else {
-        const selectColumns = joinDef.remote.select.map(
-          (col) => sql`${sql.ident(col)}`,
-        )
+        const selectColumns = effectiveCols.map((col) => sql`${sql.ident(col)}`)
         const query = sql`SELECT ${sql.join(selectColumns, ', ')}
             FROM ${sql.ident(joinDef.remote.table)}
             WHERE ${sql.ident(joinDef.remote.pk)} = ${mainRecordId}`

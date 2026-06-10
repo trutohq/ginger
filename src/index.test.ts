@@ -1927,6 +1927,251 @@ describe('Ginger Library - Comprehensive Tests', () => {
     })
   })
 
+  describe('Secret serialize/deserialize codec', () => {
+    const CodecRowSchema = z.object({
+      id: z.number(),
+      name: z.string(),
+      email: z.string(),
+      tenant_id: z.string(),
+      created_at: z.string(),
+      updated_at: z.string().nullable().optional(),
+    })
+    const CodecCreateSchema = z.object({
+      name: z.string(),
+      email: z.string().email(),
+      tenant_id: z.string(),
+      config: z.any().optional(),
+    })
+    const CodecUpdateSchema = z.object({
+      name: z.string().optional(),
+      config: z.any().optional(),
+    })
+
+    const codecSecrets = [
+      {
+        logicalName: 'config',
+        columnName: 'api_key_encrypted',
+        keyId: 'default',
+        serialize: JSON.stringify,
+        deserialize: JSON.parse,
+      },
+    ] as const
+
+    let codecService: Service<any, any, any, any, any>
+
+    beforeEach(() => {
+      codecService = createService({
+        table: 'users',
+        db,
+        rowSchema: CodecRowSchema,
+        createSchema: CodecCreateSchema,
+        updateSchema: CodecUpdateSchema,
+        secrets: codecSecrets,
+        timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' },
+        encryptionKeys: { default: testSecretKey },
+      })
+    })
+
+    const sampleConfig = {
+      client_secret: 'super-secret',
+      sp_signing_key: '-----BEGIN PRIVATE KEY-----',
+    }
+
+    it('round-trips a structured secret through create -> get', async () => {
+      const created = await codecService.create(
+        {
+          name: 'SSO One',
+          email: 'sso1@test.com',
+          tenant_id: 'tenant-1',
+          config: sampleConfig,
+        },
+        { auth: {} },
+      )
+
+      // create() returns the row without secrets by default.
+      expect(created.config).toBeUndefined()
+
+      const withSecrets = await codecService.get(created.id, {
+        auth: {},
+        includeSecrets: true,
+      })
+      expect(withSecrets?.config).toEqual(sampleConfig)
+
+      // The DB column stores an encrypted packed string, not raw JSON.
+      const raw = bunDb
+        .prepare('SELECT api_key_encrypted FROM users WHERE id = ?')
+        .get(created.id) as any
+      expect(raw.api_key_encrypted).toMatch(
+        /^[A-Za-z0-9+/]+=*:[A-Za-z0-9+/]+=*:[A-Za-z0-9+/]+=*$/,
+      )
+    })
+
+    it('round-trips a structured secret through update -> get', async () => {
+      const created = await codecService.create(
+        {
+          name: 'SSO Two',
+          email: 'sso2@test.com',
+          tenant_id: 'tenant-1',
+          config: sampleConfig,
+        },
+        { auth: {} },
+      )
+
+      const newConfig = { client_secret: 'rotated', extra: [1, 2, 3] }
+      await codecService.update(created.id, { config: newConfig }, { auth: {} })
+
+      const updated = await codecService.get(created.id, {
+        auth: {},
+        includeSecrets: true,
+      })
+      expect(updated?.config).toEqual(newConfig)
+    })
+
+    it('round-trips structured secrets through list (includeSecrets: true)', async () => {
+      await codecService.create(
+        {
+          name: 'SSO List',
+          email: 'ssolist@test.com',
+          tenant_id: 'tenant-codec',
+          config: sampleConfig,
+        },
+        { auth: {} },
+      )
+
+      const listed = await codecService.list({
+        auth: {},
+        where: { tenant_id: 'tenant-codec' },
+        includeSecrets: true,
+      })
+
+      expect(listed.result).toHaveLength(1)
+      expect(listed.result[0].config).toEqual(sampleConfig)
+    })
+
+    it('round-trips structured secrets through query (includeSecrets: true)', async () => {
+      const created = await codecService.create(
+        {
+          name: 'SSO Query',
+          email: 'ssoquery@test.com',
+          tenant_id: 'tenant-1',
+          config: sampleConfig,
+        },
+        { auth: {} },
+      )
+
+      const rows = await codecService.query(
+        'SELECT * FROM users WHERE id = ?',
+        { auth: {}, includeSecrets: true },
+        created.id,
+      )
+
+      expect(rows).toHaveLength(1)
+      expect((rows[0] as any).config).toEqual(sampleConfig)
+    })
+
+    it('does not run the codec or expose the field when includeSecrets is false', async () => {
+      const created = await codecService.create(
+        {
+          name: 'SSO Hidden',
+          email: 'ssohidden@test.com',
+          tenant_id: 'tenant-1',
+          config: sampleConfig,
+        },
+        { auth: {} },
+      )
+
+      const fetched = await codecService.get(created.id, { auth: {} })
+      expect(fetched).not.toBeNull()
+      expect('config' in (fetched as object)).toBe(false)
+      expect((fetched as any).api_key_encrypted).toBeUndefined()
+    })
+
+    it('skips the codec when no secret is provided and omits the field on read', async () => {
+      const created = await codecService.create(
+        {
+          name: 'SSO Null',
+          email: 'ssonull@test.com',
+          tenant_id: 'tenant-1',
+          // config intentionally omitted
+        },
+        { auth: {} },
+      )
+
+      const raw = bunDb
+        .prepare('SELECT api_key_encrypted FROM users WHERE id = ?')
+        .get(created.id) as any
+      expect(raw.api_key_encrypted).toBeNull()
+
+      const withSecrets = await codecService.get(created.id, {
+        auth: {},
+        includeSecrets: true,
+      })
+      expect('config' in (withSecrets as object)).toBe(false)
+    })
+
+    it('throws ValidationError when only serialize is provided', () => {
+      expect(() =>
+        createService({
+          table: 'users',
+          db,
+          rowSchema: CodecRowSchema,
+          createSchema: CodecCreateSchema,
+          updateSchema: CodecUpdateSchema,
+          secrets: [
+            {
+              logicalName: 'config',
+              columnName: 'api_key_encrypted',
+              keyId: 'default',
+              serialize: JSON.stringify,
+            },
+          ],
+          encryptionKeys: { default: testSecretKey },
+        }),
+      ).toThrow(ValidationError)
+    })
+
+    it('throws ValidationError when only deserialize is provided', () => {
+      expect(() =>
+        createService({
+          table: 'users',
+          db,
+          rowSchema: CodecRowSchema,
+          createSchema: CodecCreateSchema,
+          updateSchema: CodecUpdateSchema,
+          secrets: [
+            {
+              logicalName: 'config',
+              columnName: 'api_key_encrypted',
+              keyId: 'default',
+              deserialize: JSON.parse,
+            },
+          ],
+          encryptionKeys: { default: testSecretKey },
+        }),
+      ).toThrow(/must define both 'serialize' and 'deserialize'/)
+    })
+
+    it('allows a secret with neither serialize nor deserialize', () => {
+      expect(() =>
+        createService({
+          table: 'users',
+          db,
+          rowSchema: CodecRowSchema,
+          createSchema: CodecCreateSchema,
+          updateSchema: CodecUpdateSchema,
+          secrets: [
+            {
+              logicalName: 'config',
+              columnName: 'api_key_encrypted',
+              keyId: 'default',
+            },
+          ],
+          encryptionKeys: { default: testSecretKey },
+        }),
+      ).not.toThrow()
+    })
+  })
+
   describe('Error Handling', () => {
     it('should throw appropriate error types', () => {
       expect(() => {

@@ -478,6 +478,34 @@ Encryption is handled automatically:
 - On `create` / `update` — the `logicalName` field is encrypted and stored in the `columnName` column
 - On `get` / `list` (when `includeSecrets: true`) — the `columnName` column is decrypted and returned as `logicalName`
 
+#### Structured secrets (`serialize` / `deserialize`)
+
+By default a secret is treated as an opaque string. To store a **structured**
+value (e.g. multiple related secrets) in a single encrypted column, supply a
+symmetric codec. `serialize` runs before encrypt (its output must be a string)
+and `deserialize` runs after decrypt:
+
+```typescript
+const secrets = [
+  {
+    logicalName: 'secrets', // { client_secret?, sp_signing_key? }
+    columnName: 'config_secret',
+    keyId: 'default',
+    serialize: JSON.stringify,
+    deserialize: JSON.parse,
+  },
+] as const
+```
+
+- `serialize` and `deserialize` must be provided **together or not at all** —
+  the `Service` constructor throws a `ValidationError` for an asymmetric codec.
+- `null` / `undefined` values skip the codec entirely (field is omitted on read).
+- A `serialize` that returns a non-string (or throws) surfaces as an
+  `EncryptionError`; a `deserialize` failure is wrapped and rethrown with
+  `columnName` context rather than silently falling back to the raw string.
+- Fully backwards-compatible: with no codec, behavior is identical (string in,
+  string out).
+
 ### Hooks
 
 Feathers.js-inspired hooks with `before` / `after` / `error` phases:

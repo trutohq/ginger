@@ -114,6 +114,7 @@ export class Service<
     }
 
     this.validateSecretsNotInRowSchema()
+    this.validateSecretCodecs()
   }
 
   private stripSecretKeys(
@@ -301,6 +302,29 @@ export class Service<
       overrides[alias] = Array.from(cols)
     }
     return Object.keys(overrides).length > 0 ? overrides : undefined
+  }
+
+  /**
+   * Ensure each secret's optional codec is symmetric: `serialize` and
+   * `deserialize` must be provided together or not at all. An asymmetric
+   * codec (e.g. JSON-encode on write but raw-string on read) silently
+   * corrupts round-trips, so we fail fast at construction time.
+   */
+  private validateSecretCodecs(): void {
+    if (!this.secrets) return
+
+    for (const secret of this.secrets) {
+      const hasSerialize = typeof secret.serialize === 'function'
+      const hasDeserialize = typeof secret.deserialize === 'function'
+
+      if (hasSerialize !== hasDeserialize) {
+        throw new ValidationError(
+          `Secret field '${secret.logicalName}' must define both 'serialize' and ` +
+            `'deserialize' or neither — found only ` +
+            `'${hasSerialize ? 'serialize' : 'deserialize'}'.`,
+        )
+      }
+    }
   }
 
   private validateSecretsNotInRowSchema(): void {

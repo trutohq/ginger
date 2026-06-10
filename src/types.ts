@@ -285,12 +285,32 @@ export interface JoinDef {
 }
 
 /**
- * Secret field definition
+ * Secret field definition.
+ *
+ * `serialize`/`deserialize` form an optional, symmetric codec applied around
+ * encryption. When omitted the field behaves as a plain string passthrough
+ * (the historical behavior). When provided, `serialize` runs before encrypt
+ * (its output must be a string) and `deserialize` runs after decrypt. They
+ * must be supplied together or not at all (enforced by the `Service`
+ * constructor).
+ *
+ * @example
+ * ```ts
+ * {
+ *   logicalName: 'secrets',
+ *   columnName: 'config_secret',
+ *   keyId: 'default',
+ *   serialize: JSON.stringify,
+ *   deserialize: JSON.parse,
+ * }
+ * ```
  */
 export interface SecretFieldDef {
   logicalName: string
   columnName: string
   keyId?: string
+  serialize?: (value: unknown) => string
+  deserialize?: (value: string) => unknown
 }
 
 /**

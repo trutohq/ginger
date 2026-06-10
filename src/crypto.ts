@@ -167,11 +167,25 @@ export async function encryptSecrets<T extends Record<string, unknown>>(
   const result: Record<string, unknown> = { ...data }
 
   for (const secret of secrets) {
-    const { logicalName, columnName, keyId = 'default' } = secret
+    const { logicalName, columnName, keyId = 'default', serialize } = secret
     const value = data[logicalName]
 
     if (value !== undefined && value !== null) {
-      if (typeof value !== 'string') {
+      // Run the optional codec first; default is identity (string passthrough).
+      let plaintext: unknown = value
+      if (serialize) {
+        try {
+          plaintext = serialize(value)
+        } catch (error) {
+          throw new EncryptionError(
+            `Failed to serialize secret field "${logicalName}"`,
+            { logicalName, error },
+          )
+        }
+      }
+
+      // Guard after serialize: the value to encrypt must be a string.
+      if (typeof plaintext !== 'string') {
         throw new EncryptionError(
           `Secret field "${logicalName}" must be a string`,
           { logicalName, value },
@@ -179,7 +193,7 @@ export async function encryptSecrets<T extends Record<string, unknown>>(
       }
       // Replace logical field with encrypted column
       delete result[logicalName]
-      result[columnName] = await encrypt(value, keyProvider, keyId)
+      result[columnName] = await encrypt(plaintext, keyProvider, keyId)
     }
   }
 
@@ -197,7 +211,7 @@ export async function decryptSecrets<T extends Record<string, unknown>>(
   const result: Record<string, unknown> = { ...data }
 
   for (const secret of secrets) {
-    const { logicalName, columnName } = secret
+    const { logicalName, columnName, deserialize } = secret
     const encryptedValue = data[columnName]
 
     if (encryptedValue !== undefined && encryptedValue !== null) {
@@ -209,7 +223,21 @@ export async function decryptSecrets<T extends Record<string, unknown>>(
       }
       // Replace encrypted column with decrypted logical field
       delete result[columnName]
-      result[logicalName] = await decrypt(encryptedValue, keyProvider)
+      const raw = await decrypt(encryptedValue, keyProvider)
+
+      // Run the optional codec last; default is identity (string passthrough).
+      if (deserialize) {
+        try {
+          result[logicalName] = deserialize(raw)
+        } catch (error) {
+          throw new EncryptionError(
+            `Failed to deserialize secret field "${columnName}"`,
+            { columnName, error },
+          )
+        }
+      } else {
+        result[logicalName] = raw
+      }
     }
   }
 

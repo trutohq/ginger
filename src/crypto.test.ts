@@ -788,6 +788,173 @@ describe('crypto.ts', () => {
     })
   })
 
+  describe('serialize/deserialize codec', () => {
+    let keyProvider: DefaultKeyProvider
+    let jsonSecrets: SecretFieldDef[]
+
+    beforeEach(() => {
+      keyProvider = new DefaultKeyProvider({ default: testKey })
+      jsonSecrets = [
+        {
+          logicalName: 'secrets',
+          columnName: 'config_secret',
+          keyId: 'default',
+          serialize: JSON.stringify,
+          deserialize: JSON.parse,
+        },
+      ]
+    })
+
+    it('should round-trip a structured object through encrypt/decrypt', async () => {
+      const data = {
+        name: 'SSO Connection',
+        secrets: {
+          client_secret: 'super-secret',
+          sp_signing_key: '-----BEGIN KEY-----',
+        },
+      }
+
+      const encrypted = await encryptSecrets(data, jsonSecrets, keyProvider)
+
+      // Logical field is gone, encrypted column is a packed string.
+      expect(encrypted.secrets).toBeUndefined()
+      expect(typeof encrypted.config_secret).toBe('string')
+      expect(encrypted.config_secret).toMatch(
+        /^[A-Za-z0-9+/]+=*:[A-Za-z0-9+/]+=*:[A-Za-z0-9+/]+=*$/,
+      )
+
+      const decrypted = await decryptSecrets(
+        encrypted,
+        jsonSecrets,
+        keyProvider,
+      )
+
+      expect(decrypted).toEqual(data)
+      // The deserialized value is a real object, not a JSON string.
+      expect(decrypted.secrets).toEqual({
+        client_secret: 'super-secret',
+        sp_signing_key: '-----BEGIN KEY-----',
+      })
+    })
+
+    it('should round-trip arrays and primitives via the codec', async () => {
+      const data = { secrets: [1, 'two', { three: true }] }
+
+      const encrypted = await encryptSecrets(data, jsonSecrets, keyProvider)
+      const decrypted = await decryptSecrets(
+        encrypted,
+        jsonSecrets,
+        keyProvider,
+      )
+
+      expect(decrypted.secrets).toEqual([1, 'two', { three: true }])
+    })
+
+    it('should skip the codec entirely for null/undefined values', async () => {
+      const encNull = await encryptSecrets(
+        { name: 'x', secrets: null },
+        jsonSecrets,
+        keyProvider,
+      )
+      expect(encNull).toEqual({ name: 'x', secrets: null })
+
+      const encUndef = await encryptSecrets(
+        { name: 'x', secrets: undefined },
+        jsonSecrets,
+        keyProvider,
+      )
+      expect(encUndef).toEqual({ name: 'x' })
+
+      // On read, an absent encrypted column means the logical field is absent.
+      const dec = await decryptSecrets({ name: 'x' }, jsonSecrets, keyProvider)
+      expect(dec).toEqual({ name: 'x' })
+      expect('secrets' in dec).toBe(false)
+    })
+
+    it('should default to string passthrough when no codec is set', async () => {
+      const stringSecrets: SecretFieldDef[] = [
+        { logicalName: 'apiKey', columnName: 'api_key_enc', keyId: 'default' },
+      ]
+
+      const encrypted = await encryptSecrets(
+        { apiKey: 'sk_ex_123' },
+        stringSecrets,
+        keyProvider,
+      )
+      const decrypted = await decryptSecrets(
+        encrypted,
+        stringSecrets,
+        keyProvider,
+      )
+
+      expect(decrypted.apiKey).toBe('sk_ex_123')
+    })
+
+    it('should throw EncryptionError when serialize returns a non-string', async () => {
+      const badSecrets: SecretFieldDef[] = [
+        {
+          logicalName: 'secrets',
+          columnName: 'config_secret',
+          keyId: 'default',
+          // Returns a number — invalid: must yield a string.
+          serialize: (() => 123) as unknown as (value: unknown) => string,
+          deserialize: (v: string) => v,
+        },
+      ]
+
+      await expect(
+        encryptSecrets({ secrets: { a: 1 } }, badSecrets, keyProvider),
+      ).rejects.toThrow(EncryptionError)
+      await expect(
+        encryptSecrets({ secrets: { a: 1 } }, badSecrets, keyProvider),
+      ).rejects.toThrow('must be a string')
+    })
+
+    it('should wrap serialize throwing in an EncryptionError', async () => {
+      const throwingSecrets: SecretFieldDef[] = [
+        {
+          logicalName: 'secrets',
+          columnName: 'config_secret',
+          keyId: 'default',
+          serialize: () => {
+            throw new Error('boom')
+          },
+          deserialize: (v: string) => v,
+        },
+      ]
+
+      await expect(
+        encryptSecrets({ secrets: { a: 1 } }, throwingSecrets, keyProvider),
+      ).rejects.toThrow(EncryptionError)
+      await expect(
+        encryptSecrets({ secrets: { a: 1 } }, throwingSecrets, keyProvider),
+      ).rejects.toThrow('Failed to serialize secret field "secrets"')
+    })
+
+    it('should wrap deserialize failure in an EncryptionError with columnName', async () => {
+      // Encrypt a value that is NOT valid JSON, then try to JSON.parse it on read.
+      const passthrough: SecretFieldDef[] = [
+        {
+          logicalName: 'secrets',
+          columnName: 'config_secret',
+          keyId: 'default',
+        },
+      ]
+      const encrypted = await encryptSecrets(
+        { secrets: 'not-json{' },
+        passthrough,
+        keyProvider,
+      )
+
+      await expect(
+        decryptSecrets(encrypted, jsonSecrets, keyProvider),
+      ).rejects.toThrow(EncryptionError)
+      await expect(
+        decryptSecrets(encrypted, jsonSecrets, keyProvider),
+      ).rejects.toThrow('Failed to deserialize secret field "config_secret"')
+    })
+  })
+
   describe('getSecretColumns', () => {
     it('should return array of column names', () => {
       const secretDefs: SecretFieldDef[] = [

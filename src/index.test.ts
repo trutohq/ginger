@@ -788,14 +788,16 @@ describe('Ginger Library - Comprehensive Tests', () => {
         )
       })
 
-      it('should fallback to process.env when no keys provided', async () => {
+      it('should NOT fall back to process.env (security: no implicit ambient keys)', async () => {
         // Set environment variable for this test
         process.env.SECRET_KEY = testSecretKey
 
+        // The provider no longer silently adopts process.env.SECRET_KEY; with
+        // no keys passed, the default key is simply not found.
         const provider = new DefaultKeyProvider()
-        const key = await provider.getKey('default')
-        expect(key).toBeInstanceOf(CryptoKey)
-        expect(key.type).toBe('secret')
+        await expect(provider.getKey('default')).rejects.toThrow(
+          'Encryption key not found for keyId: default',
+        )
 
         // Clean up
         delete process.env.SECRET_KEY

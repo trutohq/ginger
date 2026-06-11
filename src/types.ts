@@ -213,6 +213,13 @@ export interface GetParams<
   include?: Record<string, boolean>
   includeSecrets?: boolean
   select?: TSelect
+  /**
+   * Additional row-level scoping filter, AND-combined with the primary-key
+   * lookup. Use this (typically set from a `before` hook) to enforce
+   * ownership / tenant isolation, e.g. `{ tenant_id: auth.user.tenantId }`.
+   * A non-matching scope causes `get` to return `null`.
+   */
+  where?: Record<string, unknown>
 }
 
 /**
@@ -235,6 +242,13 @@ export interface UpdateParams<
   include?: Record<string, boolean>
   includeSecrets?: boolean
   select?: TSelect
+  /**
+   * Additional row-level scoping filter, AND-combined with the primary-key
+   * match. Use this (typically from a `before` hook) to enforce ownership /
+   * tenant isolation. A non-matching scope makes `update` throw `NotFoundError`
+   * and never mutates the row.
+   */
+  where?: Record<string, unknown>
 }
 
 /**
@@ -242,6 +256,13 @@ export interface UpdateParams<
  */
 export interface DeleteParams {
   include?: Record<string, boolean>
+  /**
+   * Additional row-level scoping filter, AND-combined with the primary-key
+   * match. Use this (typically from a `before` hook) to enforce ownership /
+   * tenant isolation. A non-matching scope makes `delete` throw `NotFoundError`
+   * and never deletes the row.
+   */
+  where?: Record<string, unknown>
 }
 
 /**

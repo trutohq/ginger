@@ -3,6 +3,32 @@ import { SqlBuilderError } from './errors.js'
 import type { JoinDef, OrderBy } from './types.js'
 
 /**
+ * Coerce an untrusted value into a scalar that is safe to bind as a SQL
+ * parameter, throwing on anything else.
+ *
+ * SECURITY: this is the single choke point that prevents the
+ * `{ text, values }` fragment-confusion attack. `@truto/sqlite-builder`'s
+ * `sql` template treats any object shaped like a pre-compiled fragment as raw
+ * SQL. By forcing every dynamic value through this guard (which rejects
+ * objects/arrays) before interpolation, such a value can never be spliced in
+ * unescaped — it is always emitted as a bound `?` placeholder instead.
+ */
+export function toBindableValue(
+  value: unknown,
+): string | number | boolean | Date | null {
+  if (value === null || value === undefined) return null
+  const t = typeof value
+  if (t === 'string' || t === 'number' || t === 'boolean') {
+    return value as string | number | boolean
+  }
+  if (value instanceof Date) return value
+  throw new SqlBuilderError(
+    `Unsupported bound value of type "${t}". Only string, number, boolean, Date, or null may be bound as parameters.`,
+    { valueType: t },
+  )
+}
+
+/**
  * Build a SELECT query with joins and pagination.
  *
  * `joinColumnOverrides[joinName]` overrides the columns pulled from that
@@ -30,7 +56,13 @@ export function buildSelect(
 
     if (options.columns && options.columns.length > 0) {
       selectColumns.push(
-        ...options.columns.map((col) => sql.ident(`${table}.${col}`)),
+        ...options.columns.map((col) =>
+          // A bare '*' must be emitted as `"table".*`, not run through
+          // sql.ident('table.*') (which rejects the wildcard identifier).
+          col === '*'
+            ? sql`${sql.ident(table)}.*`
+            : sql.ident(`${table}.${col}`),
+        ),
       )
     } else {
       selectColumns.push(sql`${sql.ident(table)}.*`)
@@ -175,8 +207,13 @@ export function buildInsert(
     const columns = Object.keys(data)
     const values = Object.values(data)
 
-    // Create individual placeholders for the VALUES clause
-    const placeholderFragments = values.map((value) => sql`${value}`)
+    // Create individual placeholders for the VALUES clause. `toBindableValue`
+    // forces each value to be bound as a parameter and throws on non-scalar
+    // objects — preventing a `{ text, values }`-shaped value from being
+    // spliced in as a raw SQL fragment.
+    const placeholderFragments = values.map(
+      (value) => sql`${toBindableValue(value)}`,
+    )
 
     const query = sql`
       INSERT INTO ${sql.ident(table)} (${sql.ident(columns)}) 
@@ -201,9 +238,13 @@ export function buildUpdate(
   where: Record<string, unknown>,
 ): ReturnType<typeof sql> {
   try {
-    // Build SET clauses using sql fragments
+    // Build SET clauses using sql fragments. `toBindableValue` forces each
+    // value to be bound as a parameter (and rejects non-scalar objects),
+    // preventing a `{ text, values }`-shaped value from being spliced in as
+    // raw SQL.
     const setFragments = Object.entries(data).map(
-      ([column, value]) => sql`${sql.ident(column)} = ${value}`,
+      ([column, value]) =>
+        sql`${sql.ident(column)} = ${toBindableValue(value)}`,
     )
 
     // Build WHERE clause
@@ -284,8 +325,14 @@ export function buildSelectById(
     joins?: Record<string, JoinDef>
     include?: Record<string, boolean>
     joinColumnOverrides?: Record<string, string[]>
+    /**
+     * Optional row-level scoping filter, AND-combined with the primary-key
+     * match (used to enforce ownership / tenant isolation).
+     */
+    where?: Record<string, unknown>
   } = {},
 ): ReturnType<typeof sql> {
+  const { where: scope, ...restOptions } = options
   const where: Record<string, unknown> = {}
 
   // Check if there are active JOINs that could cause column ambiguity
@@ -293,6 +340,10 @@ export function buildSelectById(
     options.joins &&
     options.include &&
     Object.keys(options.include).some((key) => options.include![key])
+
+  // The scope filter columns live on the base table, so when joins are active
+  // they must be qualified under `$table` (same as the PK) to avoid ambiguity.
+  const hasScope = scope && Object.keys(scope).length > 0
 
   if (Array.isArray(primaryKey)) {
     if (typeof id !== 'object' || id === null || Array.isArray(id)) {
@@ -304,21 +355,23 @@ export function buildSelectById(
 
     if (hasActiveJoins) {
       // Use qualified table syntax to avoid column ambiguity
-      where[`$${table}`] = { ...id }
+      where[`$${table}`] = { ...id, ...(hasScope ? scope : {}) }
     } else {
       Object.assign(where, id)
+      if (hasScope) Object.assign(where, scope)
     }
   } else {
     if (hasActiveJoins) {
       // Use qualified table syntax to avoid column ambiguity
-      where[`$${table}`] = { [primaryKey]: id }
+      where[`$${table}`] = { [primaryKey]: id, ...(hasScope ? scope : {}) }
     } else {
       where[primaryKey] = id
+      if (hasScope) Object.assign(where, scope)
     }
   }
 
   return buildSelect(table, {
-    ...options,
+    ...restOptions,
     where,
     limit: 1,
   })

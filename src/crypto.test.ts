@@ -177,17 +177,21 @@ describe('crypto.ts', () => {
         )
       })
 
-      it('should handle keys of different lengths', async () => {
+      it('should reject keys that are not 256-bit (32 bytes)', async () => {
         // Create a base64 string that's shorter (16 bytes instead of 32)
         const shortKey = btoa('1234567890123456')
         const providerWithShortKey = new DefaultKeyProvider({
           short: shortKey,
         })
 
-        // Web Crypto API may accept different key lengths for AES-GCM
-        const key = await providerWithShortKey.getKey('short')
-        expect(key).toBeInstanceOf(CryptoKey)
-        expect(key.type).toBe('secret')
+        // The library advertises AES-256-GCM, so a 128-bit key is rejected
+        // rather than silently weakening the cipher.
+        await expect(providerWithShortKey.getKey('short')).rejects.toThrow(
+          EncryptionError,
+        )
+        await expect(providerWithShortKey.getKey('short')).rejects.toThrow(
+          '32 bytes',
+        )
       })
     })
   })

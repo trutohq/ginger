@@ -7,16 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-06-11
+
+### Security
+
+- **Critical:** Fix SQL injection via forged pagination cursors — reject non-primitive cursor values and bind all dynamic SQL values through `toBindableValue()` so `{ text, values }` objects cannot be spliced as raw SQL
+- **High:** Add optional `where` scope on `get`, `update`, and `delete` for row-level authorization (tenant/ownership isolation); `before` hooks can now inject `ctx.params.where` and the method honours it
+
 ### Changed
 
-- **BREAKING:** Renamed D1-specific types to generic names: `D1Database` -> `Database`, `D1PreparedStatement` -> `PreparedStatement`, `D1Result` -> `QueryResult`, `D1ExecResult` -> `ExecResult`
-- Deleted `MockD1Database` test utility; tests now use the production `fromBunSqlite` adapter
+- **BREAKING:** `DefaultKeyProvider` no longer falls back to `process.env.SECRET_KEY` — encryption keys must be passed explicitly or via a custom `keyProvider`
+- **BREAKING:** `before` hooks on `get`, `update`, and `delete` now affect the operation (params are read from `ctx.params` after hooks run)
+- Enforce 256-bit (32-byte) AES keys in `DefaultKeyProvider.getKey`
+- Validate `list` `limit` is a positive integer (rejects negative, zero, and non-integer values)
+- Block ordering by declared secret columns regardless of row schema shape
+- Emit safe `"table".*` wildcard in `buildSelect` instead of invalid `sql.ident('table.*')`
 
 ### Added
 
-- `fromBunSqlite(db)` adapter — wraps a `bun:sqlite` `Database` into the generic `Database` interface
-- `fromDurableObjectStorage(sql)` adapter — wraps a Durable Object `SqlStorage` into the generic `Database` interface
-- Exported structural types: `BunSqliteDatabase`, `BunSqliteStatement`, `DurableObjectSqlStorage`, `SqlStorageCursor`
+- `toBindableValue()` helper in `sql-builder` for safe parameter binding
+- `where` option on `GetParams`, `UpdateParams`, and `DeleteParams`
+
+### Documentation
+
+- README: new "Row-level authorization (multi-tenant scoping)" section with hook pattern and `count`/`query` caveats
 
 ## [1.0.0]
 

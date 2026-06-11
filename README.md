@@ -751,7 +751,7 @@ CREATE TABLE profiles (
 - A supported SQLite backend: Cloudflare D1, `bun:sqlite`, or Durable Object `SqlStorage`
 - TypeScript 5.0+
 - Zod 3.25+ (v4)
-- @truto/sqlite-builder 1.0+
+- @truto/sqlite-builder 2.0+
 
 ## Development
 

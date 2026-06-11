@@ -1,6 +1,6 @@
 {
   "name": "@truto/ginger",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "A type-safe SQLite data access layer for Cloudflare D1, Bun SQLite, and Durable Objects with cursor pagination, joins, AES-256-GCM encryption, and a Feathers.js-inspired hook system",
   "keywords": [
     "cloudflare",
@@ -61,7 +61,7 @@
     ]
   },
   "dependencies": {
-    "@truto/sqlite-builder": "1.0.4",
+    "@truto/sqlite-builder": "2.0.1",
     "zod": "3.25.67"
   },
   "devDependencies": {

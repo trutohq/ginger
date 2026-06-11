@@ -1,10 +1,11 @@
 {
   "lockfileVersion": 1,
+  "configVersion": 0,
   "workspaces": {
     "": {
       "name": "my-typescript-library",
       "dependencies": {
-        "@truto/sqlite-builder": "1.0.4",
+        "@truto/sqlite-builder": "2.0.1",
         "zod": "3.25.67",
       },
       "devDependencies": {
@@ -227,7 +228,7 @@
 
     "@rollup/rollup-win32-x64-msvc": ["@rollup/rollup-win32-x64-msvc@4.44.0", "", { "os": "win32", "cpu": "x64" }, "sha512-Q2Mgwt+D8hd5FIPUuPDsvPR7Bguza6yTkJxspDGkZj7tBRn2y4KSWYuIXpftFSjBra76TbKerCV7rgFPQrn+wQ=="],
 
-    "@truto/sqlite-builder": ["@truto/sqlite-builder@1.0.4", "", {}, "sha512-EcvmzX34tQA5CBxC6pSnXVLVxRfFthAuyTncR4sAtKSdFq5ES98ga4uD415+S6/P2dQ2soiO1q0C3KcocWTRww=="],
+    "@truto/sqlite-builder": ["@truto/sqlite-builder@2.0.1", "", {}, "sha512-CZeCtr0O2RWiwq3wWic0H48WFRqV/YNkQSqWSqxHqh8Pf9B1yM0j2DP+3FUzHRWxr8qlFWR/QxcArihdvADb+Q=="],
 
     "@types/bun": ["@types/bun@1.2.17", "", { "dependencies": { "bun-types": "1.2.17" } }, "sha512-l/BYs/JYt+cXA/0+wUhulYJB6a6p//GTPiJ7nV+QHa8iiId4HZmnu/3J/SowP5g0rTiERY2kfGKXEK5Ehltx4Q=="],
 

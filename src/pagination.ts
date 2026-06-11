@@ -149,7 +149,7 @@ export function buildCursorConditions(
 
     if (i === orderBy.length - 1) {
       // Last column: simple comparison.
-      // `sql.value()` coerces/validates the bound value and throws on
+      // `toBindableValue()` coerces/validates the bound value and throws on
       // non-scalar objects, so it can never be treated as a raw fragment.
       conditions.push(
         useGreaterThan

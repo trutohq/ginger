@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-06-11
+
+### Changed
+
+- Bump `@truto/sqlite-builder` to 2.0.1 (unforgeable SQL fragments, branded `compileFilter` output, placeholder integrity checks)
+
 ## [2.0.0] - 2026-06-11
 
 ### Security

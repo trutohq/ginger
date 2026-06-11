@@ -9,15 +9,12 @@ export class DefaultKeyProvider implements KeyProvider {
   private keys: Map<string, string>
 
   constructor(keys: Record<string, string> = {}) {
+    // SECURITY: keys must be passed explicitly. We intentionally do NOT fall
+    // back to process.env.SECRET_KEY — implicitly adopting an ambient env var
+    // as the default encryption key leads to surprising key provenance in
+    // shared/CI environments. Callers that want env-based keys should read
+    // them explicitly and pass them here (or supply a custom keyProvider).
     this.keys = new Map(Object.entries(keys))
-    // If no keys provided but a default key exists, use it
-    if (
-      this.keys.size === 0 &&
-      typeof process !== 'undefined' &&
-      process.env?.SECRET_KEY
-    ) {
-      this.keys.set('default', process.env.SECRET_KEY)
-    }
   }
 
   async getKey(keyId: string = 'default'): Promise<CryptoKey> {
@@ -39,6 +36,16 @@ export class DefaultKeyProvider implements KeyProvider {
           .map((char) => char.charCodeAt(0)),
       )
 
+      // SECURITY: enforce a 256-bit key. The library advertises AES-256-GCM;
+      // silently accepting a shorter (e.g. 128-bit) key would weaken the
+      // cipher without any signal to the caller.
+      if (keyData.length !== 32) {
+        throw new EncryptionError(
+          `Encryption key for keyId "${keyId}" must be 32 bytes (256-bit) when base64-decoded, but got ${keyData.length} bytes`,
+          { keyId },
+        )
+      }
+
       const cryptoKey = await crypto.subtle.importKey(
         'raw',
         keyData,
@@ -50,6 +57,10 @@ export class DefaultKeyProvider implements KeyProvider {
       this.keyCache.set(keyId, cryptoKey)
       return cryptoKey
     } catch (error) {
+      // Preserve our own typed errors (e.g. the key-length check above).
+      if (error instanceof EncryptionError) {
+        throw error
+      }
       throw new EncryptionError(
         `Failed to import encryption key: ${error instanceof Error ? error.message : 'Unknown error'}`,
         { keyId, error },

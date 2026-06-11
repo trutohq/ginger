@@ -139,6 +139,10 @@ function createUsersService(
     encryptionKeys,
     timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' },
     hooks: {
+      // NOTE: this scopes `list` only. In a real multi-tenant app you must
+      // also scope `get` / `update` / `delete` (and `count`) the same way,
+      // or callers can reach other tenants' rows by id. See
+      // "Row-level authorization (multi-tenant scoping)" below.
       list: {
         before: async (ctx: any) => {
           if (!ctx.auth.user?.tenantId) throw new Error('Missing tenant')
@@ -300,6 +304,78 @@ interface AuthContext {
   }
 }
 ```
+
+### Row-level authorization (multi-tenant scoping)
+
+> **Important:** Ginger does **not** apply any implicit tenant/ownership
+> filter. By default, `get`, `update`, and `delete` locate rows by **primary
+> key only** — so a caller who knows (or guesses) an `id` can read or mutate
+> **any** row, including other tenants'. In a multi-tenant app you **must**
+> scope these methods yourself, or you have an IDOR.
+
+`list`, `get`, `update`, and `delete` all accept an optional `where` filter
+that is **AND-combined** with the operation. For `get`/`update`/`delete` it is
+combined with the primary-key lookup; a non-matching scope makes `get` return
+`null` and makes `update`/`delete` throw `NotFoundError` (the row is never
+touched).
+
+The recommended pattern is to inject the scope from a `before` hook so every
+method is covered with one helper. Hooks mutate `ctx.params.where`, which the
+method reads when it runs:
+
+```typescript
+import { createService, type BaseCtx } from '@truto/ginger'
+
+// Scope every read/write to the caller's tenant.
+async function scopeToTenant(ctx: BaseCtx) {
+  const tenantId = ctx.auth.user?.tenantId
+  if (!tenantId) throw new Error('Missing tenant')
+  ;(ctx.params as { where?: Record<string, unknown> }).where = {
+    ...(ctx.params as { where?: Record<string, unknown> }).where,
+    tenant_id: tenantId,
+  }
+}
+
+const usersService = createService({
+  // ...
+  hooks: {
+    list: { before: scopeToTenant },
+    get: { before: scopeToTenant },
+    update: { before: scopeToTenant },
+    delete: { before: scopeToTenant },
+    count: { before: scopeToTenant }, // see caveat below
+    create: {
+      before: async (ctx) => {
+        if (!ctx.auth.user?.tenantId) throw new Error('Missing tenant')
+        ;(ctx.data as { tenant_id?: string }).tenant_id = ctx.auth.user.tenantId
+      },
+    },
+  },
+})
+
+// Now cross-tenant access is denied:
+await usersService.get(otherTenantId, { auth }) // → null
+await usersService.update(otherTenantId, data, { auth }) // → throws NotFoundError
+await usersService.delete(otherTenantId, { auth }) // → throws NotFoundError
+```
+
+You can also pass the scope per call instead of via a hook:
+
+```typescript
+await usersService.get(id, { auth, where: { tenant_id: 'tnt_1' } })
+```
+
+The `where` scope is a full filter object (same syntax as `list`'s `where`),
+so richer predicates work too — e.g. `where: { status: { ne: 'archived' } }`.
+
+> **`count` is not auto-scoped.** `count(params)` has its own `where` and is
+> **not** combined with anything implicitly — scope it explicitly (per call or
+> via a `count` before-hook) exactly like the methods above, or it will count
+> across all tenants.
+
+> **`query` is unscoped by design.** The low-level `query` escape hatch runs
+> the SQL you give it; apply your own filtering and never interpolate
+> untrusted input into the SQL string (use the bound `...params`).
 
 ### Pagination
 

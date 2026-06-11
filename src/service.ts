@@ -85,6 +85,7 @@ export class Service<
 
   private readonly hooks: Partial<HookMap<BaseCtx>>
   private readonly secretKeysToStrip: Set<string>
+  private readonly secretColumns: Set<string>
 
   constructor(
     options: ServiceOptions<TRow, TCreate, TUpdate, TJoins, TSecrets>,
@@ -106,10 +107,12 @@ export class Service<
       new DefaultKeyProvider(options.encryptionKeys || {})
 
     this.secretKeysToStrip = new Set<string>()
+    this.secretColumns = new Set<string>()
     if (this.secrets) {
       for (const s of this.secrets) {
         this.secretKeysToStrip.add(s.columnName)
         this.secretKeysToStrip.add(s.logicalName)
+        this.secretColumns.add(s.columnName)
       }
     }
 
@@ -386,7 +389,11 @@ export class Service<
         select,
       } = params
 
-      // Validate limit
+      // Validate limit: must be a positive integer and within the cap.
+      // (A negative limit would become `LIMIT -1` — unbounded — in SQLite.)
+      if (!Number.isInteger(limit) || limit < 1) {
+        throw new ValidationError('Limit must be a positive integer')
+      }
       if (limit > 1000) {
         throw new ValidationError('Limit cannot exceed 1000')
       }
@@ -425,6 +432,18 @@ export class Service<
         } catch (error) {
           throw new ValidationError(
             `Invalid cursor: ${error instanceof Error ? error.message : 'Unknown error'}`,
+          )
+        }
+      }
+
+      // Never allow ordering by an encrypted secret column. For schemas with a
+      // declared shape this is already covered by validateOrderBy, but for
+      // shapeless schemas (where the generic column allow-list is unavailable)
+      // this guard still prevents leaking ordering information about ciphertext.
+      for (const order of orderBy) {
+        if (this.secretColumns.has(order.column)) {
+          throw new ValidationError(
+            `Cannot order by secret column "${order.column}".`,
           )
         }
       }
@@ -554,7 +573,12 @@ export class Service<
     try {
       await this.runHooks('before', 'get', ctx)
 
-      const { include = {}, includeSecrets = false, select } = opts
+      // Read effective options from ctx.params so `before` hooks can mutate
+      // them (e.g. inject a tenant-scoping `where`).
+      const effective = (ctx.params ?? {}) as GetParams & {
+        where?: Record<string, unknown>
+      }
+      const { include = {}, includeSecrets = false, select, where } = effective
 
       const parsedSelect = this.parseSelect(select, include)
       const columns = this.resolveMainColumns(parsedSelect, [], includeSecrets)
@@ -573,6 +597,7 @@ export class Service<
           ...(this.joins ? { joins: this.joins } : {}),
           include,
           ...(joinColumnOverrides ? { joinColumnOverrides } : {}),
+          ...(where ? { where } : {}),
         },
       )
 
@@ -767,10 +792,24 @@ export class Service<
     try {
       await this.runHooks('before', 'update', ctx)
 
-      const { include = {}, includeSecrets = false, select } = opts
+      // Read effective options from ctx.params so `before` hooks can mutate
+      // them (e.g. inject a tenant-scoping `where`).
+      const effective = (ctx.params ?? {}) as UpdateParams & {
+        where?: Record<string, unknown>
+      }
+      const {
+        include = {},
+        includeSecrets = false,
+        select,
+        where: scope,
+      } = effective
 
-      // Check if record exists
-      const existingRecord = await this.get(id, { auth: opts.auth })
+      // Check if record exists within the caller's scope. A non-matching scope
+      // yields null here → NotFoundError, so the row is never mutated.
+      const existingRecord = await this.get(id, {
+        auth: opts.auth,
+        ...(scope ? { where: scope } : {}),
+      })
       if (!existingRecord) {
         throw new NotFoundError(this.table, id)
       }
@@ -803,6 +842,11 @@ export class Service<
       } else {
         where[this.primaryKey] = id
       }
+      // Defense-in-depth: also scope the UPDATE itself so it can only touch
+      // rows matching both the PK and the caller's scope filter.
+      if (scope && Object.keys(scope).length > 0) {
+        Object.assign(where, scope)
+      }
 
       // Build and execute update
       const { text: query, values: params } = buildUpdate(
@@ -822,6 +866,7 @@ export class Service<
         include,
         includeSecrets,
         ...(select ? { select } : {}),
+        ...(scope ? { where: scope } : {}),
         auth: opts.auth,
       } as GetParams<TSelect> & MethodOptions)
 
@@ -854,8 +899,19 @@ export class Service<
     try {
       await this.runHooks('before', 'delete', ctx)
 
-      // Check if record exists
-      const existingRecord = await this.get(id, { auth: opts.auth })
+      // Read effective options from ctx.params so `before` hooks can mutate
+      // them (e.g. inject a tenant-scoping `where`).
+      const effective = (ctx.params ?? {}) as DeleteParams & {
+        where?: Record<string, unknown>
+      }
+      const { where: scope } = effective
+
+      // Check if record exists within the caller's scope. A non-matching scope
+      // yields null here → NotFoundError, so the row is never deleted.
+      const existingRecord = await this.get(id, {
+        auth: opts.auth,
+        ...(scope ? { where: scope } : {}),
+      })
       if (!existingRecord) {
         throw new NotFoundError(this.table, id)
       }
@@ -869,6 +925,11 @@ export class Service<
         Object.assign(where, id)
       } else {
         where[this.primaryKey] = id
+      }
+      // Defense-in-depth: also scope the DELETE itself so it can only remove
+      // rows matching both the PK and the caller's scope filter.
+      if (scope && Object.keys(scope).length > 0) {
+        Object.assign(where, scope)
       }
 
       // Build and execute delete

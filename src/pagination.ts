@@ -1,5 +1,6 @@
 import { sql } from '@truto/sqlite-builder'
 import { CursorError } from './errors.js'
+import { toBindableValue } from './sql-builder.js'
 import type { CursorToken, OrderBy } from './types.js'
 
 /**
@@ -36,6 +37,24 @@ export function decodeCursor(cursor: string): CursorToken {
 
     if (!Array.isArray(parsed.values)) {
       throw new Error('Invalid values in cursor')
+    }
+
+    // SECURITY: cursor values are client-supplied (the cursor is just
+    // base64(JSON)). Only allow primitives. Without this guard an attacker can
+    // smuggle a `{ text, values }`-shaped object that @truto/sqlite-builder's
+    // `sql` template would splice in as a RAW SQL fragment → SQL injection.
+    for (const value of parsed.values) {
+      const t = typeof value
+      if (
+        value !== null &&
+        t !== 'string' &&
+        t !== 'number' &&
+        t !== 'boolean'
+      ) {
+        throw new Error(
+          'Invalid value in cursor: only string, number, boolean, or null are allowed',
+        )
+      }
     }
 
     if (!parsed.direction || !['next', 'prev'].includes(parsed.direction)) {
@@ -129,11 +148,13 @@ export function buildCursorConditions(
       (direction === 'next') === (order.direction === 'asc')
 
     if (i === orderBy.length - 1) {
-      // Last column: simple comparison
+      // Last column: simple comparison.
+      // `sql.value()` coerces/validates the bound value and throws on
+      // non-scalar objects, so it can never be treated as a raw fragment.
       conditions.push(
         useGreaterThan
-          ? sql`${columnIdent} > ${value}`
-          : sql`${columnIdent} < ${value}`,
+          ? sql`${columnIdent} > ${toBindableValue(value)}`
+          : sql`${columnIdent} < ${toBindableValue(value)}`,
       )
     } else {
       // Multi-column: build composite condition
@@ -158,12 +179,14 @@ export function buildCursorConditions(
             (direction === 'next') === (currentOrder.direction === 'asc')
           equalityConditions.push(
             currentUseGt
-              ? sql`${currentColumnIdent} > ${currentValue}`
-              : sql`${currentColumnIdent} < ${currentValue}`,
+              ? sql`${currentColumnIdent} > ${toBindableValue(currentValue)}`
+              : sql`${currentColumnIdent} < ${toBindableValue(currentValue)}`,
           )
         } else {
           // Earlier conditions: use equality
-          equalityConditions.push(sql`${currentColumnIdent} = ${currentValue}`)
+          equalityConditions.push(
+            sql`${currentColumnIdent} = ${toBindableValue(currentValue)}`,
+          )
         }
       }
 

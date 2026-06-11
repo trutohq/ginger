@@ -27,8 +27,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `toBindableValue()` helper in `sql-builder` for safe parameter binding
 - `where` option on `GetParams`, `UpdateParams`, and `DeleteParams`
-- `SECURITY-AUDIT.md` with findings, verification evidence, and remediation notes
-- `src/security-exploits.test.ts` regression suite (exploit cases flipped to assert secure behaviour)
 
 ### Documentation
 

@@ -473,12 +473,7 @@ export class Service<
         resolveOrderByColumn(column, this.table, resolvedJoins, this.expose)
 
       const cursorFlatKey = (column: string) =>
-        flatColumnKeyForOrderBy(
-          column,
-          this.table,
-          resolvedJoins,
-          this.expose,
-        )
+        flatColumnKeyForOrderBy(column, this.table, resolvedJoins, this.expose)
 
       // Handle cursor pagination
       let cursorConditions: ReturnType<typeof sql> | undefined
@@ -738,10 +733,7 @@ export class Service<
       )[0]!
 
       // Handle one-to-many joins with separate queries
-      if (
-        this.joins &&
-        hasActiveIncludes(normalizedInclude)
-      ) {
+      if (this.joins && hasActiveIncludes(normalizedInclude)) {
         processedRow = await this.fetchOneToManyJoins(
           processedRow,
           topLevelIncludeFlags(normalizedInclude),
@@ -1321,7 +1313,12 @@ export class Service<
 
     return rows.map((row) => {
       if (resolvedJoins.length > 0) {
-        return nestJoinedData(row, this.joins!, normalizedInclude, resolvedJoins)
+        return nestJoinedData(
+          row,
+          this.joins!,
+          normalizedInclude,
+          resolvedJoins,
+        )
       }
 
       // Legacy flat join processing (no resolved join graph)

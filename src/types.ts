@@ -502,34 +502,35 @@ type IncludeEnabled<T> = T extends true
     ? true
     : false
 
-type JoinResultType<TJoin extends JoinDef> =
-  TJoin['kind'] extends 'one'
-    ? z.infer<TJoin['schema']> | null
-    : z.infer<TJoin['schema']>[]
+type JoinResultType<TJoin extends JoinDef> = TJoin['kind'] extends 'one'
+  ? z.infer<TJoin['schema']> | null
+  : z.infer<TJoin['schema']>[]
 
 type ComputeNestedJoins<
   TNested extends Record<string, JoinDef> | undefined,
   TInclude extends IncludeNode | undefined,
-> = TNested extends Record<string, JoinDef>
-  ? TInclude extends IncludeNode
-    ? {
-        [K in keyof TNested &
-          keyof TInclude]: K extends 'select'
-          ? never
-          : IncludeEnabled<TInclude[K]> extends true
-            ? TNested[K] extends JoinDef
-              ? JoinResultType<TNested[K]> &
-                  (TNested[K]['joins'] extends Record<string, JoinDef>
-                    ? ComputeNestedJoins<
-                        TNested[K]['joins'],
-                        TInclude[K] extends IncludeNode ? TInclude[K] : undefined
-                      >
-                    : Record<string, never>)
+> =
+  TNested extends Record<string, JoinDef>
+    ? TInclude extends IncludeNode
+      ? {
+          [K in keyof TNested & keyof TInclude]: K extends 'select'
+            ? never
+            : IncludeEnabled<TInclude[K]> extends true
+              ? TNested[K] extends JoinDef
+                ? JoinResultType<TNested[K]> &
+                    (TNested[K]['joins'] extends Record<string, JoinDef>
+                      ? ComputeNestedJoins<
+                          TNested[K]['joins'],
+                          TInclude[K] extends IncludeNode
+                            ? TInclude[K]
+                            : undefined
+                        >
+                      : Record<string, never>)
+                : never
               : never
-            : never
-      }
+        }
+      : Record<string, never>
     : Record<string, never>
-  : Record<string, never>
 
 export type ComputeJoins<
   TJoins extends Record<string, JoinDef>,
@@ -551,13 +552,12 @@ export type ComputeJoins<
   : Record<string, never>
 
 /** Merge exposed column types onto a row type. */
-export type ComputeExposed<
-  TExpose extends readonly ExposeDef[] | undefined,
-> = TExpose extends readonly ExposeDef[]
-  ? {
-      [E in TExpose[number] as E['as']]: unknown
-    }
-  : Record<string, never>
+export type ComputeExposed<TExpose extends readonly ExposeDef[] | undefined> =
+  TExpose extends readonly ExposeDef[]
+    ? {
+        [E in TExpose[number] as E['as']]: unknown
+      }
+    : Record<string, never>
 
 /**
  * Extract row type from service

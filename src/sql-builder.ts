@@ -195,10 +195,9 @@ export function buildJoin(
 ): ReturnType<typeof sql> {
   const localCol = joinDef.localColumn ?? joinDef.localPk
   if (!localCol) {
-    throw new SqlBuilderError(
-      'JoinDef requires localColumn or localPk',
-      { joinDef },
-    )
+    throw new SqlBuilderError('JoinDef requires localColumn or localPk', {
+      joinDef,
+    })
   }
   const { remote, through } = joinDef
 
@@ -414,15 +413,14 @@ export function buildSelectById(
   let joinScope: Record<string, unknown> = {}
 
   if (hasScope) {
-    const translated =
-      hasActiveJoins
-        ? translateWhereForJoins(
-            scope,
-            table,
-            options.resolvedJoins ?? [],
-            options.expose,
-          )
-        : { ...scope }
+    const translated = hasActiveJoins
+      ? translateWhereForJoins(
+          scope,
+          table,
+          options.resolvedJoins ?? [],
+          options.expose,
+        )
+      : { ...scope }
 
     for (const [key, value] of Object.entries(translated)) {
       if (key.startsWith('$')) {

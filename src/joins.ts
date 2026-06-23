@@ -74,8 +74,7 @@ function normalizeIncludeValue(
     if (child?.enabled) children[key] = child
   }
 
-  const enabled =
-    select !== undefined || Object.keys(children).length > 0
+  const enabled = select !== undefined || Object.keys(children).length > 0
 
   if (!enabled) return null
 
@@ -119,11 +118,9 @@ export function resolveActiveJoins(
       neededPaths.add(path)
 
       const columnPrefix = joinDef.remote.alias || name
-      const override = joinColumnOverrides?.[path] ?? joinColumnOverrides?.[name]
-      const select =
-        override ??
-        node.select ??
-        joinDef.remote.select
+      const override =
+        joinColumnOverrides?.[path] ?? joinColumnOverrides?.[name]
+      const select = override ?? node.select ?? joinDef.remote.select
 
       resolved.push({
         path,
@@ -138,12 +135,7 @@ export function resolveActiveJoins(
       })
 
       if (joinDef.joins && Object.keys(node.children).length > 0) {
-        walk(
-          joinDef.joins,
-          node.children,
-          joinDef.remote.table,
-          path,
-        )
+        walk(joinDef.joins, node.children, joinDef.remote.table, path)
       }
     }
   }
@@ -152,7 +144,14 @@ export function resolveActiveJoins(
 
   // Auto-include ancestor joins for expose-only paths
   for (const path of neededPaths) {
-    ensurePathIncluded(path, rootJoins, include, resolved, baseTable, joinColumnOverrides)
+    ensurePathIncluded(
+      path,
+      rootJoins,
+      include,
+      resolved,
+      baseTable,
+      joinColumnOverrides,
+    )
   }
 
   const deduped = dedupeResolvedJoins(resolved)
@@ -189,8 +188,7 @@ function ensurePathIncluded(
       const columnPrefix = joinDef.remote.alias || name
       const override =
         joinColumnOverrides?.[subPath] ?? joinColumnOverrides?.[name]
-      const select =
-        override ?? node?.select ?? joinDef.remote.select
+      const select = override ?? node?.select ?? joinDef.remote.select
 
       resolved.push({
         path: subPath,
@@ -253,7 +251,9 @@ export function parseQualifiedPath(qualified: string): {
   isTableQualified: boolean
 } {
   if (!qualified.startsWith('$')) {
-    throw new SqlBuilderError(`Qualified path must start with '$': ${qualified}`)
+    throw new SqlBuilderError(
+      `Qualified path must start with '$': ${qualified}`,
+    )
   }
   const body = qualified.slice(1)
   const lastDot = body.lastIndexOf('.')
@@ -371,9 +371,7 @@ export function buildExposeSelectColumns(
       const parts = exp.from.slice(1).split('.')
       const table = parts[0]!
       const col = parts[1] ?? column
-      columns.push(
-        sql`${sql.ident(`${table}.${col}`)} as ${sql.ident(exp.as)}`,
-      )
+      columns.push(sql`${sql.ident(`${table}.${col}`)} as ${sql.ident(exp.as)}`)
       continue
     }
 
@@ -406,9 +404,7 @@ export function buildJoinFilterContext(
 
   const exposeColumns = new Map<string, { table: string; column: string }>()
   for (const exp of expose ?? []) {
-    const { joinPath, column, isTableQualified } = parseQualifiedPath(
-      exp.from,
-    )
+    const { joinPath, column, isTableQualified } = parseQualifiedPath(exp.from)
     if (isTableQualified && !joinPath) {
       const parts = exp.from.slice(1).split('.')
       exposeColumns.set(exp.as, {
@@ -439,11 +435,7 @@ export function translateWhereForJoins(
 ): Record<string, unknown> {
   if (Object.keys(where).length === 0) return where
 
-  const { exposeColumns } = buildJoinFilterContext(
-    resolved,
-    expose,
-    baseTable,
-  )
+  const { exposeColumns } = buildJoinFilterContext(resolved, expose, baseTable)
   const joinedTables = new Set(resolved.map((r) => r.sqlTable))
 
   const out: Record<string, unknown> = {}
@@ -517,9 +509,11 @@ export function resolveOrderByColumn(
 ): string {
   const exposeMatch = (expose ?? []).find((e) => e.as === column)
   if (exposeMatch) {
-    const { joinPath, column: col, isTableQualified } = parseQualifiedPath(
-      exposeMatch.from,
-    )
+    const {
+      joinPath,
+      column: col,
+      isTableQualified,
+    } = parseQualifiedPath(exposeMatch.from)
     if (isTableQualified && !joinPath) {
       const parts = exposeMatch.from.slice(1).split('.')
       return `${parts[0]}.${parts[1] ?? col}`
@@ -530,9 +524,11 @@ export function resolveOrderByColumn(
   }
 
   if (column.startsWith('$')) {
-    const { joinPath, column: col, isTableQualified } = parseQualifiedPath(
-      column,
-    )
+    const {
+      joinPath,
+      column: col,
+      isTableQualified,
+    } = parseQualifiedPath(column)
     if (isTableQualified && !joinPath) {
       const parts = column.slice(1).split('.')
       return `${parts[0]}.${parts[1]}`

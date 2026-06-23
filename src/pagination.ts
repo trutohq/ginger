@@ -115,6 +115,7 @@ export function createCursor(
 export function buildCursorConditions(
   cursor: CursorToken,
   tableName?: string,
+  resolveColumn?: (column: string) => string,
 ): ReturnType<typeof sql> {
   const { orderBy, values, direction } = cursor
 
@@ -129,19 +130,19 @@ export function buildCursorConditions(
     return sql``
   }
 
-  // Build comparison conditions for cursor pagination
-  // For next: use > or < based on sort direction
-  // For prev: use < or > based on sort direction (opposite)
   const conditions: ReturnType<typeof sql>[] = []
+
+  const columnRef = (order: OrderBy): string => {
+    if (resolveColumn) return resolveColumn(order.column)
+    if (tableName) return `${tableName}.${order.column}`
+    return order.column
+  }
 
   for (let i = 0; i < orderBy.length; i++) {
     const order = orderBy[i]!
     const value = values[i]
 
-    // Build column identifier safely
-    const columnIdent = tableName
-      ? sql.ident(`${tableName}.${order.column}`)
-      : sql.ident(order.column)
+    const columnIdent = sql.ident(columnRef(order))
 
     // Determine if we need > or < based on cursor direction and sort direction
     const useGreaterThan =
@@ -168,10 +169,7 @@ export function buildCursorConditions(
         const currentOrder = orderBy[j]!
         const currentValue = values[j]
 
-        // Build current column identifier safely
-        const currentColumnIdent = tableName
-          ? sql.ident(`${tableName}.${currentOrder.column}`)
-          : sql.ident(currentOrder.column)
+        const currentColumnIdent = sql.ident(columnRef(currentOrder))
 
         if (j === i) {
           // Last condition in this group: use comparison

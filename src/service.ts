@@ -17,6 +17,17 @@ import {
   validateOrderBy,
 } from './pagination.js'
 import {
+  flatColumnKeyForOrderBy,
+  hasActiveIncludes,
+  legacyJoinColumnAlias,
+  nestJoinedData,
+  normalizeInclude,
+  resolveActiveJoins,
+  resolveOrderByColumn,
+  topLevelIncludeFlags,
+  validateOrderByWithJoins,
+} from './joins.js'
+import {
   buildCount,
   buildDelete,
   buildInsert,
@@ -32,6 +43,8 @@ import type {
   CreateParams,
   Database,
   DeleteParams,
+  ExposeDef,
+  IncludeMap,
   GetParams,
   HookMap,
   JoinDef,
@@ -82,6 +95,7 @@ export class Service<
   public readonly keyProvider: KeyProvider
   public readonly deps: Record<string, BaseService<any, any, any, any, any>>
   public readonly timestamps: TimestampConfig | undefined
+  public readonly expose: readonly ExposeDef[] | undefined
 
   private readonly hooks: Partial<HookMap<BaseCtx>>
   private readonly secretKeysToStrip: Set<string>
@@ -96,6 +110,7 @@ export class Service<
     this.createSchema = options.createSchema
     this.updateSchema = options.updateSchema
     this.joins = options.joins
+    this.expose = options.expose
     this.secrets = options.secrets as TSecrets | undefined
     this.hooks = options.hooks || {}
     this.deps = options.deps || {}
@@ -160,7 +175,7 @@ export class Service<
    */
   private parseSelect(
     select: readonly SelectField[] | undefined,
-    include: Record<string, boolean>,
+    include: IncludeMap,
   ): ParsedSelect | undefined {
     if (!select || select.length === 0) return undefined
 
@@ -195,7 +210,7 @@ export class Service<
             }.`,
           )
         }
-        if (!include[alias]) {
+        if (!this.isJoinPathIncluded(alias, include)) {
           throw new ValidationError(
             `select token "${raw}" requires include.${alias} = true.`,
           )
@@ -265,6 +280,8 @@ export class Service<
       out.add(pk)
     }
     for (const order of orderBy) {
+      if (order.column.startsWith('$')) continue
+      if (this.expose?.some((e) => e.as === order.column)) continue
       out.add(order.column)
     }
 
@@ -290,21 +307,52 @@ export class Service<
    */
   private resolveJoinOverrides(
     parsed: ParsedSelect | undefined,
-    include: Record<string, boolean>,
+    include: IncludeMap,
   ): Record<string, string[]> | undefined {
     if (!parsed || !this.joins) return undefined
 
     const overrides: Record<string, string[]> = {}
     for (const [alias, value] of Object.entries(parsed.joinColumns)) {
-      if (!include[alias]) continue
-      const def = this.joins[alias]
+      if (!this.isJoinPathIncluded(alias, include)) continue
+      const def = this.joins[alias as keyof TJoins]
       if (!def) continue
-      if (value === '*') continue // use configured remote.select
+      if (value === '*') continue
       const cols = new Set<string>(value)
       cols.add(def.remote.pk)
       overrides[alias] = Array.from(cols)
     }
     return Object.keys(overrides).length > 0 ? overrides : undefined
+  }
+
+  private isJoinPathIncluded(path: string, include: IncludeMap): boolean {
+    const normalized = normalizeInclude(include)
+    const segments = path.split('.')
+    let nodes = normalized
+    for (const seg of segments) {
+      const node = nodes[seg]
+      if (!node?.enabled) return false
+      nodes = node.children
+    }
+    return true
+  }
+
+  private prepareJoinContext(
+    include: IncludeMap | undefined,
+    joinColumnOverrides?: Record<string, string[]>,
+  ) {
+    const normalized = normalizeInclude(include)
+    const schemaCols = this.getSchemaColumns()
+    const reservedColumnNames =
+      schemaCols.length === 1 && schemaCols[0] === '*' ? [] : schemaCols
+    const resolved = resolveActiveJoins(
+      this.joins,
+      normalized,
+      this.expose,
+      this.table,
+      joinColumnOverrides,
+      reservedColumnNames,
+    )
+    return { normalized, resolved }
   }
 
   /**
@@ -389,6 +437,9 @@ export class Service<
         select,
       } = params
 
+      const { normalized: normalizedInclude, resolved: resolvedJoins } =
+        this.prepareJoinContext(include)
+
       // Validate limit: must be a positive integer and within the cap.
       // (A negative limit would become `LIMIT -1` — unbounded — in SQLite.)
       if (!Number.isInteger(limit) || limit < 1) {
@@ -405,8 +456,29 @@ export class Service<
       // Validate order by columns (skip if schema shape is unavailable)
       const allowedColumns = this.getAllowedColumns()
       if (!allowedColumns.includes('*')) {
-        validateOrderBy(orderBy, allowedColumns)
+        if (resolvedJoins.length > 0) {
+          validateOrderByWithJoins(
+            orderBy,
+            allowedColumns,
+            resolvedJoins,
+            this.expose,
+            this.table,
+          )
+        } else {
+          validateOrderBy(orderBy, allowedColumns)
+        }
       }
+
+      const resolveColumn = (column: string) =>
+        resolveOrderByColumn(column, this.table, resolvedJoins, this.expose)
+
+      const cursorFlatKey = (column: string) =>
+        flatColumnKeyForOrderBy(
+          column,
+          this.table,
+          resolvedJoins,
+          this.expose,
+        )
 
       // Handle cursor pagination
       let cursorConditions: ReturnType<typeof sql> | undefined
@@ -418,9 +490,18 @@ export class Service<
 
           // Use cursor's orderBy if present
           if (cursorToken.orderBy.length > 0) {
-            // Re-validate cursor columns against allowlist to prevent bypass
             if (!allowedColumns.includes('*')) {
-              validateOrderBy(cursorToken.orderBy, allowedColumns)
+              if (resolvedJoins.length > 0) {
+                validateOrderByWithJoins(
+                  cursorToken.orderBy,
+                  allowedColumns,
+                  resolvedJoins,
+                  this.expose,
+                  this.table,
+                )
+              } else {
+                validateOrderBy(cursorToken.orderBy, allowedColumns)
+              }
             }
             orderBy =
               cursorToken.direction === 'prev'
@@ -428,7 +509,11 @@ export class Service<
                 : cursorToken.orderBy
           }
 
-          cursorConditions = buildCursorConditions(cursorToken, this.table)
+          cursorConditions = buildCursorConditions(
+            cursorToken,
+            this.table,
+            resolveColumn,
+          )
         } catch (error) {
           throw new ValidationError(
             `Invalid cursor: ${error instanceof Error ? error.message : 'Unknown error'}`,
@@ -459,13 +544,16 @@ export class Service<
         include,
       )
 
-      // Build and execute query
+      const { resolved: resolvedJoinsForQuery } = this.prepareJoinContext(
+        include,
+        joinColumnOverrides,
+      )
+
       const { text: query, values: sqlParams } = buildSelect(this.table, {
         ...(columns ? { columns } : {}),
         where,
-        ...(this.joins ? { joins: this.joins } : {}),
-        include,
-        ...(joinColumnOverrides ? { joinColumnOverrides } : {}),
+        resolvedJoins: resolvedJoinsForQuery,
+        ...(this.expose ? { expose: this.expose } : {}),
         orderBy,
         limit: actualLimit,
         ...(cursorConditions ? { cursorConditions } : {}),
@@ -494,7 +582,8 @@ export class Service<
       // Process joins (honour per-call join column overrides)
       const processedRows = this.processJoinedRows(
         rows,
-        include,
+        normalizedInclude,
+        resolvedJoinsForQuery,
         joinColumnOverrides,
       )
 
@@ -508,12 +597,17 @@ export class Service<
           return this.projectRow(r, include, includeSecrets)
         }
         const validated = this.rowSchema.parse(this.stripSecretKeys(r))
-        return includeSecrets
+        const base = includeSecrets
           ? {
               ...(validated as Record<string, unknown>),
               ...this.extractSecretFields(r),
             }
-          : validated
+          : (validated as Record<string, unknown>)
+        return {
+          ...base,
+          ...this.extractJoinData(r, include),
+          ...this.extractExposedColumns(r),
+        }
       })
 
       // Generate cursors
@@ -522,13 +616,30 @@ export class Service<
 
       if (validatedRows.length > 0) {
         if (hasNextPage) {
-          const lastRow = validatedRows[validatedRows.length - 1]!
-          nextCursor = encodeCursor(createCursor(lastRow, orderBy, 'next'))
+          const lastRow = validatedRows[validatedRows.length - 1]! as Record<
+            string,
+            unknown
+          >
+          const cursorRow = { ...lastRow }
+          for (const order of orderBy) {
+            const flatKey = cursorFlatKey(order.column)
+            if (flatKey !== order.column && flatKey in lastRow) {
+              cursorRow[order.column] = lastRow[flatKey]
+            }
+          }
+          nextCursor = encodeCursor(createCursor(cursorRow, orderBy, 'next'))
         }
 
         if (cursor) {
-          const firstRow = validatedRows[0]!
-          prevCursor = encodeCursor(createCursor(firstRow, orderBy, 'prev'))
+          const firstRow = validatedRows[0]! as Record<string, unknown>
+          const cursorRow = { ...firstRow }
+          for (const order of orderBy) {
+            const flatKey = cursorFlatKey(order.column)
+            if (flatKey !== order.column && flatKey in firstRow) {
+              cursorRow[order.column] = firstRow[flatKey]
+            }
+          }
+          prevCursor = encodeCursor(createCursor(cursorRow, orderBy, 'prev'))
         }
       }
 
@@ -587,16 +698,17 @@ export class Service<
         include,
       )
 
-      // Build and execute query
+      const { normalized: normalizedInclude, resolved: resolvedJoins } =
+        this.prepareJoinContext(include, joinColumnOverrides)
+
       const { text: query, values: params } = buildSelectById(
         this.table,
         this.primaryKey,
         id,
         {
           ...(columns ? { columns } : {}),
-          ...(this.joins ? { joins: this.joins } : {}),
-          include,
-          ...(joinColumnOverrides ? { joinColumnOverrides } : {}),
+          resolvedJoins,
+          ...(this.expose ? { expose: this.expose } : {}),
           ...(where ? { where } : {}),
         },
       )
@@ -620,15 +732,19 @@ export class Service<
       // Process joins (honour per-call join column overrides)
       let processedRow = this.processJoinedRows(
         [row],
-        include,
+        normalizedInclude,
+        resolvedJoins,
         joinColumnOverrides,
       )[0]!
 
       // Handle one-to-many joins with separate queries
-      if (this.joins && Object.keys(include).length > 0) {
+      if (
+        this.joins &&
+        hasActiveIncludes(normalizedInclude)
+      ) {
         processedRow = await this.fetchOneToManyJoins(
           processedRow,
-          include,
+          topLevelIncludeFlags(normalizedInclude),
           id,
           joinColumnOverrides,
         )
@@ -650,6 +766,7 @@ export class Service<
           ...baseRow,
           ...(includeSecrets ? this.extractSecretFields(row) : {}),
           ...this.extractJoinData(processedRow, include),
+          ...this.extractExposedColumns(processedRow),
         }
       }
 
@@ -971,10 +1088,20 @@ export class Service<
     try {
       await this.runHooks('before', 'count', ctx)
 
-      const { where = {} } = params
+      const { where = {}, include = {} } = params
 
-      // Build and execute count query
-      const { text: query, values: sqlParams } = buildCount(this.table, where)
+      const { resolved: resolvedJoins } = this.prepareJoinContext(include)
+
+      const pk = Array.isArray(this.primaryKey)
+        ? this.primaryKey[0]!
+        : this.primaryKey
+
+      const { text: query, values: sqlParams } = buildCount(this.table, {
+        where,
+        resolvedJoins,
+        ...(this.expose ? { expose: this.expose } : {}),
+        primaryKey: pk,
+      })
       const stmt = this.db.prepare(query)
       const result = await stmt.bind(...sqlParams).first()
 
@@ -1161,7 +1288,7 @@ export class Service<
    */
   private projectRow(
     row: Record<string, unknown>,
-    _include: Record<string, boolean>,
+    _include: IncludeMap,
     includeSecrets: boolean,
   ): Record<string, unknown> {
     const out: Record<string, unknown> = { ...row }
@@ -1184,16 +1311,22 @@ export class Service<
    */
   private processJoinedRows(
     rows: Record<string, unknown>[],
-    include: Record<string, boolean>,
+    normalizedInclude: ReturnType<typeof normalizeInclude>,
+    resolvedJoins: ReturnType<typeof resolveActiveJoins>,
     joinColumnOverrides?: Record<string, string[]>,
   ): Record<string, unknown>[] {
-    if (!this.joins || Object.keys(include).length === 0) {
+    if (!this.joins || !hasActiveIncludes(normalizedInclude)) {
       return rows
     }
 
-    const joins = this.joins!
-
     return rows.map((row) => {
+      if (resolvedJoins.length > 0) {
+        return nestJoinedData(row, this.joins!, normalizedInclude, resolvedJoins)
+      }
+
+      // Legacy flat join processing (no resolved join graph)
+      const joins = this.joins!
+      const include = topLevelIncludeFlags(normalizedInclude)
       const processedRow = { ...row }
 
       for (const [joinName, joinDef] of Object.entries(joins)) {
@@ -1206,21 +1339,18 @@ export class Service<
         const effectiveCols =
           joinColumnOverrides?.[joinName] ?? joinDef.remote.select
         for (const column of effectiveCols) {
-          const aliasedKey = `${joinAlias}_${column}`
+          const aliasedKey = legacyJoinColumnAlias(joinAlias, column)
           if (aliasedKey in row) {
             joinData[column] = row[aliasedKey]
             keysToRemove.push(aliasedKey)
           }
         }
 
-        // Remove aliased keys from main row
         for (const key of keysToRemove) {
           delete processedRow[key]
         }
 
-        // Add join data based on join kind
         if (joinDef.kind === 'one') {
-          // For one-to-one, add as object or null
           const hasData =
             Object.keys(joinData).length > 0 &&
             Object.values(joinData).some(
@@ -1228,8 +1358,6 @@ export class Service<
             )
           processedRow[joinName] = hasData ? joinData : null
         } else {
-          // For one-to-many, this will be overridden by fetchOneToManyJoins
-          // But set a default empty array for now
           processedRow[joinName] = []
         }
       }
@@ -1239,22 +1367,49 @@ export class Service<
   }
 
   /**
+   * Copy exposed top-level columns from a processed row.
+   */
+  private extractExposedColumns(
+    row: Record<string, unknown>,
+  ): Record<string, unknown> {
+    if (!this.expose) return {}
+    const out: Record<string, unknown> = {}
+    for (const exp of this.expose) {
+      if (exp.as in row) out[exp.as] = row[exp.as]
+    }
+    return out
+  }
+
+  /**
    * Extract only join data from processed row
    */
   private extractJoinData(
     processedRow: Record<string, unknown>,
-    include: Record<string, boolean>,
+    include: IncludeMap,
   ): Record<string, unknown> {
     if (!this.joins) return {}
 
+    const normalized = normalizeInclude(include)
     const joinData: Record<string, unknown> = {}
 
-    for (const joinName of Object.keys(this.joins)) {
-      if (include[joinName] && joinName in processedRow) {
-        joinData[joinName] = processedRow[joinName]
+    function walk(
+      joins: Record<string, JoinDef>,
+      nodes: Record<string, import('./joins.js').NormalizedIncludeNode>,
+    ): void {
+      for (const joinName of Object.keys(joins)) {
+        const node = nodes[joinName]
+        if (!node?.enabled) continue
+        if (joinName in processedRow) {
+          joinData[joinName] = processedRow[joinName]
+        }
+        const def = joins[joinName]
+        if (def?.joins && Object.keys(node.children).length > 0) {
+          walk(def.joins, node.children)
+        }
       }
     }
 
+    walk(this.joins, normalized)
     return joinData
   }
 

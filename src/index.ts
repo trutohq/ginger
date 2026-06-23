@@ -21,6 +21,7 @@ export type {
   AuthContext,
   BaseCtx,
   BaseService,
+  ComputeExposed,
   ComputeJoins,
   CountParams,
   CreateParams,
@@ -28,6 +29,7 @@ export type {
   // Core types
   Database,
   ExecResult,
+  ExposeDef,
   PreparedStatement,
   QueryResult,
   DeleteParams,
@@ -37,6 +39,9 @@ export type {
   HookMap,
   HookPhase,
   // Configuration
+  IncludeMap,
+  IncludeNode,
+  IncludeSpec,
   JoinDef,
   JoinKind,
   KeyProvider,

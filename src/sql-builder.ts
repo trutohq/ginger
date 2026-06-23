@@ -1,6 +1,15 @@
 import { compileFilter, sql } from '@truto/sqlite-builder'
 import { SqlBuilderError } from './errors.js'
-import type { JoinDef, OrderBy } from './types.js'
+import {
+  buildExposeSelectColumns,
+  buildJoinFragments,
+  buildJoinSelectColumns,
+  legacyJoinColumnAlias,
+  resolveOrderByColumn,
+  translateWhereForJoins,
+  type ResolvedJoin,
+} from './joins.js'
+import type { ExposeDef, JoinDef, OrderBy } from './types.js'
 
 /**
  * Coerce an untrusted value into a scalar that is safe to bind as a SQL
@@ -28,37 +37,36 @@ export function toBindableValue(
   )
 }
 
+export interface BuildSelectOptions {
+  columns?: string[]
+  where?: Record<string, unknown>
+  /** @deprecated Use resolvedJoins instead. */
+  joins?: Record<string, JoinDef>
+  /** @deprecated Use resolvedJoins instead. */
+  include?: Record<string, boolean>
+  /** @deprecated Use resolvedJoins instead. */
+  joinColumnOverrides?: Record<string, string[]>
+  resolvedJoins?: ResolvedJoin[]
+  expose?: readonly ExposeDef[]
+  orderBy?: OrderBy[]
+  limit?: number
+  offset?: number
+  cursorConditions?: ReturnType<typeof sql>
+}
+
 /**
  * Build a SELECT query with joins and pagination.
- *
- * `joinColumnOverrides[joinName]` overrides the columns pulled from that
- * join's remote table for this query only (instead of using the join's
- * configured `remote.select`). The base service uses this to honour the
- * caller's `select: ['$alias.col', ...]` request.
  */
 export function buildSelect(
   table: string,
-  options: {
-    columns?: string[]
-    where?: Record<string, unknown>
-    joins?: Record<string, JoinDef>
-    include?: Record<string, boolean>
-    joinColumnOverrides?: Record<string, string[]>
-    orderBy?: OrderBy[]
-    limit?: number
-    offset?: number
-    cursorConditions?: ReturnType<typeof sql>
-  } = {},
+  options: BuildSelectOptions = {},
 ): ReturnType<typeof sql> {
   try {
-    // Build column list
     const selectColumns: ReturnType<typeof sql>[] = []
 
     if (options.columns && options.columns.length > 0) {
       selectColumns.push(
         ...options.columns.map((col) =>
-          // A bare '*' must be emitted as `"table".*`, not run through
-          // sql.ident('table.*') (which rejects the wildcard identifier).
           col === '*'
             ? sql`${sql.ident(table)}.*`
             : sql.ident(`${table}.${col}`),
@@ -68,7 +76,11 @@ export function buildSelect(
       selectColumns.push(sql`${sql.ident(table)}.*`)
     }
 
-    if (options.joins && options.include) {
+    const resolved = options.resolvedJoins ?? []
+    if (resolved.length > 0) {
+      selectColumns.push(...buildJoinSelectColumns(resolved))
+    } else if (options.joins && options.include) {
+      // Legacy flat join path (backward compat)
       for (const [joinName, joinDef] of Object.entries(options.joins)) {
         if (options.include[joinName]) {
           const joinAlias = joinDef.remote.alias || joinName
@@ -76,18 +88,27 @@ export function buildSelect(
             options.joinColumnOverrides?.[joinName] ?? joinDef.remote.select
           const joinColumns = cols.map(
             (col) =>
-              sql`${sql.ident(`${joinDef.remote.table}.${col}`)} as ${sql.ident(`${joinAlias}_${col}`)}`,
+              sql`${sql.ident(`${joinDef.remote.table}.${col}`)} as ${sql.ident(legacyJoinColumnAlias(joinAlias, col))}`,
           )
           selectColumns.push(...joinColumns)
         }
       }
     }
 
-    // Start building the query using sql.join for the column fragments
+    if (options.expose && options.expose.length > 0) {
+      selectColumns.push(
+        ...buildExposeSelectColumns(options.expose, resolved, table),
+      )
+    }
+
     let query = sql`SELECT ${sql.join(selectColumns, ', ')} FROM ${sql.ident(table)}`
 
-    // Add joins
-    if (options.joins && options.include) {
+    if (resolved.length > 0) {
+      const joinFragments = buildJoinFragments(resolved)
+      if (joinFragments.length > 0) {
+        query = sql.join([query, ...joinFragments], ' ')
+      }
+    } else if (options.joins && options.include) {
       const joinFragments: ReturnType<typeof sql>[] = []
       for (const [joinName, joinDef] of Object.entries(options.joins)) {
         if (options.include[joinName]) {
@@ -99,33 +120,40 @@ export function buildSelect(
       }
     }
 
-    // Build final query parts
     const finalParts: ReturnType<typeof sql>[] = [query]
-
-    // Build WHERE conditions
     const whereFragments: ReturnType<typeof sql>[] = []
 
-    // Regular WHERE conditions
     if (options.where && Object.keys(options.where).length > 0) {
-      const whereFilter = compileFilter(options.where as any)
-      whereFragments.push(whereFilter)
+      const translated =
+        resolved.length > 0
+          ? translateWhereForJoins(
+              options.where,
+              table,
+              resolved,
+              options.expose,
+            )
+          : options.where
+      whereFragments.push(compileFilter(translated as any))
     }
 
-    // Cursor conditions
     if (options.cursorConditions && options.cursorConditions.text) {
       whereFragments.push(options.cursorConditions)
     }
 
-    // Add WHERE clause if needed
     if (whereFragments.length > 0) {
       const whereClause = sql.join(whereFragments, ' AND ')
       finalParts.push(sql`WHERE ${whereClause}`)
     }
 
-    // Add ORDER BY
     if (options.orderBy && options.orderBy.length > 0) {
       const orderFragments = options.orderBy.map((order) => {
-        const col = sql.ident(`${table}.${order.column}`)
+        const colRef = resolveOrderByColumn(
+          order.column,
+          table,
+          resolved,
+          options.expose,
+        )
+        const col = sql.ident(colRef)
         switch (order.direction.toLowerCase()) {
           case 'asc':
             return sql`${col} ASC`
@@ -141,17 +169,14 @@ export function buildSelect(
       finalParts.push(sql`ORDER BY ${sql.join(orderFragments, ', ')}`)
     }
 
-    // Add LIMIT
     if (options.limit) {
       finalParts.push(sql`LIMIT ${options.limit}`)
     }
 
-    // Add OFFSET
     if (options.offset) {
       finalParts.push(sql`OFFSET ${options.offset}`)
     }
 
-    // If no WHERE conditions, just join all parts
     return sql.join(finalParts, ' ')
   } catch (error) {
     throw new SqlBuilderError(
@@ -162,17 +187,23 @@ export function buildSelect(
 }
 
 /**
- * Build a JOIN clause
+ * Build a JOIN clause from the base table (legacy single-hop API).
  */
-function buildJoin(
+export function buildJoin(
   baseTable: string,
   joinDef: JoinDef,
 ): ReturnType<typeof sql> {
-  const { remote, localPk, through } = joinDef
+  const localCol = joinDef.localColumn ?? joinDef.localPk
+  if (!localCol) {
+    throw new SqlBuilderError(
+      'JoinDef requires localColumn or localPk',
+      { joinDef },
+    )
+  }
+  const { remote, through } = joinDef
 
   if (through) {
-    // Many-to-many join through junction table
-    const throughJoin = sql`LEFT JOIN ${sql.ident(through.table)} ON ${sql.ident(`${baseTable}.${localPk}`)} = ${sql.ident(`${through.table}.${through.from}`)}`
+    const throughJoin = sql`LEFT JOIN ${sql.ident(through.table)} ON ${sql.ident(`${baseTable}.${localCol}`)} = ${sql.ident(`${through.table}.${through.from}`)}`
     const remoteJoin = sql`LEFT JOIN ${sql.ident(remote.table)} ON ${sql.ident(`${through.table}.${through.to}`)} = ${sql.ident(`${remote.table}.${remote.pk}`)}`
 
     const joinFragments = [throughJoin, remoteJoin]
@@ -182,18 +213,17 @@ function buildJoin(
     }
 
     return sql.join(joinFragments, ' ')
-  } else {
-    // Direct join
-    const joinFragments = [
-      sql`LEFT JOIN ${sql.ident(remote.table)} ON ${sql.ident(`${baseTable}.${localPk}`)} = ${sql.ident(`${remote.table}.${remote.pk}`)}`,
-    ]
-
-    if (joinDef.where && Object.keys(joinDef.where).length > 0) {
-      joinFragments.push(sql`AND ${compileFilter(joinDef.where as any)}`)
-    }
-
-    return sql.join(joinFragments, ' ')
   }
+
+  const joinFragments = [
+    sql`LEFT JOIN ${sql.ident(remote.table)} ON ${sql.ident(`${baseTable}.${localCol}`)} = ${sql.ident(`${remote.table}.${remote.pk}`)}`,
+  ]
+
+  if (joinDef.where && Object.keys(joinDef.where).length > 0) {
+    joinFragments.push(sql`AND ${compileFilter(joinDef.where as any)}`)
+  }
+
+  return sql.join(joinFragments, ' ')
 }
 
 /**
@@ -207,10 +237,6 @@ export function buildInsert(
     const columns = Object.keys(data)
     const values = Object.values(data)
 
-    // Create individual placeholders for the VALUES clause. `toBindableValue`
-    // forces each value to be bound as a parameter and throws on non-scalar
-    // objects — preventing a `{ text, values }`-shaped value from being
-    // spliced in as a raw SQL fragment.
     const placeholderFragments = values.map(
       (value) => sql`${toBindableValue(value)}`,
     )
@@ -238,16 +264,11 @@ export function buildUpdate(
   where: Record<string, unknown>,
 ): ReturnType<typeof sql> {
   try {
-    // Build SET clauses using sql fragments. `toBindableValue` forces each
-    // value to be bound as a parameter (and rejects non-scalar objects),
-    // preventing a `{ text, values }`-shaped value from being spliced in as
-    // raw SQL.
     const setFragments = Object.entries(data).map(
       ([column, value]) =>
         sql`${sql.ident(column)} = ${toBindableValue(value)}`,
     )
 
-    // Build WHERE clause
     const whereFilter = compileFilter(where as any)
 
     const queryParts = [
@@ -289,18 +310,64 @@ export function buildDelete(
   }
 }
 
+export interface BuildCountOptions {
+  where?: Record<string, unknown>
+  resolvedJoins?: ResolvedJoin[]
+  expose?: readonly ExposeDef[]
+  primaryKey?: string
+}
+
 /**
- * Build a COUNT query
+ * Build a COUNT query, optionally with the same join graph as list/get.
  */
 export function buildCount(
   table: string,
-  where?: Record<string, unknown>,
+  whereOrOptions?: Record<string, unknown> | BuildCountOptions,
+  legacyWhere?: Record<string, unknown>,
 ): ReturnType<typeof sql> {
   try {
-    const queryParts = [sql`SELECT COUNT(*) as count FROM ${sql.ident(table)}`]
+    let where: Record<string, unknown> | undefined
+    let resolved: ResolvedJoin[] = []
+    let expose: readonly ExposeDef[] | undefined
+    let primaryKey = 'id'
+
+    if (
+      whereOrOptions &&
+      ('resolvedJoins' in whereOrOptions ||
+        'expose' in whereOrOptions ||
+        'primaryKey' in whereOrOptions)
+    ) {
+      const opts = whereOrOptions as BuildCountOptions
+      where = opts.where
+      resolved = opts.resolvedJoins ?? []
+      expose = opts.expose
+      primaryKey = opts.primaryKey ?? 'id'
+    } else {
+      where = (whereOrOptions as Record<string, unknown>) ?? legacyWhere
+    }
+
+    const countExpr =
+      resolved.length > 0
+        ? sql`COUNT(DISTINCT ${sql.ident(`${table}.${primaryKey}`)})`
+        : sql`COUNT(*)`
+
+    const queryParts = [
+      sql`SELECT ${countExpr} as count FROM ${sql.ident(table)}`,
+    ]
+
+    if (resolved.length > 0) {
+      const joinFragments = buildJoinFragments(resolved)
+      if (joinFragments.length > 0) {
+        queryParts.push(sql.join(joinFragments, ' '))
+      }
+    }
 
     if (where && Object.keys(where).length > 0) {
-      const whereFilter = compileFilter(where as any)
+      const translated =
+        resolved.length > 0
+          ? translateWhereForJoins(where, table, resolved, expose)
+          : where
+      const whereFilter = compileFilter(translated as any)
       queryParts.push(sql`WHERE ${whereFilter}`)
     }
 
@@ -308,9 +375,19 @@ export function buildCount(
   } catch (error) {
     throw new SqlBuilderError(
       `Failed to build COUNT query: ${error instanceof Error ? error.message : 'Unknown error'}`,
-      { table, where, error },
+      { table, whereOrOptions, error },
     )
   }
+}
+
+export interface BuildSelectByIdOptions {
+  columns?: string[]
+  joins?: Record<string, JoinDef>
+  include?: Record<string, boolean>
+  joinColumnOverrides?: Record<string, string[]>
+  resolvedJoins?: ResolvedJoin[]
+  expose?: readonly ExposeDef[]
+  where?: Record<string, unknown>
 }
 
 /**
@@ -320,30 +397,41 @@ export function buildSelectById(
   table: string,
   primaryKey: string | string[],
   id: string | number | Record<string, unknown>,
-  options: {
-    columns?: string[]
-    joins?: Record<string, JoinDef>
-    include?: Record<string, boolean>
-    joinColumnOverrides?: Record<string, string[]>
-    /**
-     * Optional row-level scoping filter, AND-combined with the primary-key
-     * match (used to enforce ownership / tenant isolation).
-     */
-    where?: Record<string, unknown>
-  } = {},
+  options: BuildSelectByIdOptions = {},
 ): ReturnType<typeof sql> {
   const { where: scope, ...restOptions } = options
   const where: Record<string, unknown> = {}
 
-  // Check if there are active JOINs that could cause column ambiguity
   const hasActiveJoins =
-    options.joins &&
-    options.include &&
-    Object.keys(options.include).some((key) => options.include![key])
+    (options.resolvedJoins && options.resolvedJoins.length > 0) ||
+    (options.joins &&
+      options.include &&
+      Object.keys(options.include).some((key) => options.include![key]))
 
-  // The scope filter columns live on the base table, so when joins are active
-  // they must be qualified under `$table` (same as the PK) to avoid ambiguity.
   const hasScope = scope && Object.keys(scope).length > 0
+
+  let baseScope: Record<string, unknown> = {}
+  let joinScope: Record<string, unknown> = {}
+
+  if (hasScope) {
+    const translated =
+      hasActiveJoins
+        ? translateWhereForJoins(
+            scope,
+            table,
+            options.resolvedJoins ?? [],
+            options.expose,
+          )
+        : { ...scope }
+
+    for (const [key, value] of Object.entries(translated)) {
+      if (key.startsWith('$')) {
+        joinScope[key] = value
+      } else {
+        baseScope[key] = value
+      }
+    }
+  }
 
   if (Array.isArray(primaryKey)) {
     if (typeof id !== 'object' || id === null || Array.isArray(id)) {
@@ -354,19 +442,19 @@ export function buildSelectById(
     }
 
     if (hasActiveJoins) {
-      // Use qualified table syntax to avoid column ambiguity
-      where[`$${table}`] = { ...id, ...(hasScope ? scope : {}) }
+      where[`$${table}`] = { ...id, ...baseScope }
+      Object.assign(where, joinScope)
     } else {
       Object.assign(where, id)
-      if (hasScope) Object.assign(where, scope)
+      if (hasScope) Object.assign(where, baseScope)
     }
   } else {
     if (hasActiveJoins) {
-      // Use qualified table syntax to avoid column ambiguity
-      where[`$${table}`] = { [primaryKey]: id, ...(hasScope ? scope : {}) }
+      where[`$${table}`] = { [primaryKey]: id, ...baseScope }
+      Object.assign(where, joinScope)
     } else {
       where[primaryKey] = id
-      if (hasScope) Object.assign(where, scope)
+      if (hasScope) Object.assign(where, baseScope)
     }
   }
 

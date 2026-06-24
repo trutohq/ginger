@@ -183,7 +183,7 @@ export interface ListParams<
   limit?: number
   orderBy?: OrderBy[]
   where?: Record<string, unknown>
-  include?: Record<string, boolean>
+  include?: IncludeMap
   includeSecrets?: boolean
   select?: TSelect
 }
@@ -202,6 +202,8 @@ export interface ListResult<T> {
  */
 export interface CountParams {
   where?: Record<string, unknown>
+  /** Join graph to use when filtering on joined / exposed columns. */
+  include?: IncludeMap
 }
 
 /**
@@ -210,7 +212,7 @@ export interface CountParams {
 export interface GetParams<
   TSelect extends readonly SelectField[] | undefined = undefined,
 > {
-  include?: Record<string, boolean>
+  include?: IncludeMap
   includeSecrets?: boolean
   select?: TSelect
   /**
@@ -228,7 +230,7 @@ export interface GetParams<
 export interface CreateParams<
   TSelect extends readonly SelectField[] | undefined = undefined,
 > {
-  include?: Record<string, boolean>
+  include?: IncludeMap
   includeSecrets?: boolean
   select?: TSelect
 }
@@ -239,7 +241,7 @@ export interface CreateParams<
 export interface UpdateParams<
   TSelect extends readonly SelectField[] | undefined = undefined,
 > {
-  include?: Record<string, boolean>
+  include?: IncludeMap
   includeSecrets?: boolean
   select?: TSelect
   /**
@@ -255,7 +257,7 @@ export interface UpdateParams<
  * Delete parameters
  */
 export interface DeleteParams {
-  include?: Record<string, boolean>
+  include?: IncludeMap
   /**
    * Additional row-level scoping filter, AND-combined with the primary-key
    * match. Use this (typically from a `before` hook) to enforce ownership /
@@ -285,11 +287,46 @@ export interface MethodOptions {
 export type JoinKind = 'one' | 'many'
 
 /**
+ * Top-level column projection from a joined column.
+ *
+ * @example `{ from: '$environment_integration.environment_id', as: 'environment_id' }`
+ */
+export interface ExposeDef {
+  /** Qualified join path, e.g. `$environment_integration.environment_id`. */
+  from: string
+  /** Top-level alias on the returned row. */
+  as: string
+}
+
+/**
+ * Include spec for a single join. `true` includes default columns; an object
+ * may set `select` and/or enable nested joins by key.
+ */
+export type IncludeSpec = boolean | IncludeNode
+
+export interface IncludeNode {
+  select?: string[]
+  [nestedJoin: string]: boolean | IncludeSpec | string[] | undefined
+}
+
+/** Map of join names to include specs (supports nested includes). */
+export type IncludeMap = Record<string, IncludeSpec>
+
+/**
  * Join definition
  */
 export interface JoinDef {
   kind: JoinKind
-  localPk: string
+  /**
+   * @deprecated Prefer `localColumn` for FK joins; kept for backward compat.
+   * Parent-table column used in the ON clause when `localColumn` is omitted.
+   */
+  localPk?: string
+  /**
+   * Local FK column on the parent table (base table or parent join's remote
+   * table). Falls back to `localPk` when omitted.
+   */
+  localColumn?: string
   through?: {
     table: string
     from: string
@@ -303,6 +340,8 @@ export interface JoinDef {
   }
   where?: Record<string, unknown>
   schema: z.ZodTypeAny
+  /** Nested joins reachable from this join's remote table. */
+  joins?: Record<string, JoinDef>
 }
 
 /**
@@ -439,6 +478,11 @@ export interface ServiceOptions<
   createSchema: TCreate
   updateSchema: TUpdate
   joins?: TJoins
+  /**
+   * Project joined columns onto the top-level row, e.g.
+   * `{ from: '$environment_integration.environment_id', as: 'environment_id' }`.
+   */
+  expose?: ExposeDef[]
   secrets?: TSecrets
   timestamps?: TimestampConfig
   hooks?: Partial<HookMap<BaseCtx>>
@@ -452,17 +496,66 @@ export interface ServiceOptions<
 /**
  * Compute join types based on include parameter
  */
+type IncludeEnabled<T> = T extends true
+  ? true
+  : T extends Record<string, unknown>
+    ? true
+    : false
+
+type JoinResultType<TJoin extends JoinDef> = TJoin['kind'] extends 'one'
+  ? z.infer<TJoin['schema']> | null
+  : z.infer<TJoin['schema']>[]
+
+type ComputeNestedJoins<
+  TNested extends Record<string, JoinDef> | undefined,
+  TInclude extends IncludeNode | undefined,
+> =
+  TNested extends Record<string, JoinDef>
+    ? TInclude extends IncludeNode
+      ? {
+          [K in keyof TNested & keyof TInclude]: K extends 'select'
+            ? never
+            : IncludeEnabled<TInclude[K]> extends true
+              ? TNested[K] extends JoinDef
+                ? JoinResultType<TNested[K]> &
+                    (TNested[K]['joins'] extends Record<string, JoinDef>
+                      ? ComputeNestedJoins<
+                          TNested[K]['joins'],
+                          TInclude[K] extends IncludeNode
+                            ? TInclude[K]
+                            : undefined
+                        >
+                      : Record<string, never>)
+                : never
+              : never
+        }
+      : Record<string, never>
+    : Record<string, never>
+
 export type ComputeJoins<
   TJoins extends Record<string, JoinDef>,
-  TInclude extends Record<string, boolean> | undefined,
-> =
-  TInclude extends Record<string, boolean>
-    ? {
-        [K in keyof TInclude & keyof TJoins]: TInclude[K] extends true
-          ? TJoins[K]['kind'] extends 'one'
-            ? z.infer<TJoins[K]['schema']> | null
-            : z.infer<TJoins[K]['schema']>[]
+  TInclude extends IncludeMap | undefined,
+> = TInclude extends IncludeMap
+  ? {
+      [K in keyof TInclude & keyof TJoins]: IncludeEnabled<
+        TInclude[K]
+      > extends true
+        ? TJoins[K] extends JoinDef
+          ? JoinResultType<TJoins[K]> &
+              ComputeNestedJoins<
+                TJoins[K]['joins'],
+                TInclude[K] extends IncludeNode ? TInclude[K] : undefined
+              >
           : never
+        : never
+    }
+  : Record<string, never>
+
+/** Merge exposed column types onto a row type. */
+export type ComputeExposed<TExpose extends readonly ExposeDef[] | undefined> =
+  TExpose extends readonly ExposeDef[]
+    ? {
+        [E in TExpose[number] as E['as']]: unknown
       }
     : Record<string, never>
 

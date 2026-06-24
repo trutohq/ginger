@@ -441,6 +441,96 @@ const user = await service.get(id, {
 // user.teams   → TeamRow[]
 ```
 
+#### FK joins vs PK joins
+
+By default, a direct (`kind: 'one'`) join uses `localPk` on the base table in the
+`ON` clause (`base.localPk = remote.pk`) — the classic `users.id = profiles.user_id`
+pattern when `remote.pk` is the FK column.
+
+When the FK lives on the **base** table instead (e.g.
+`integrated_account.environment_integration_id → environment_integration.id`),
+use `localColumn`:
+
+```typescript
+environment_integration: {
+  kind: 'one' as const,
+  localColumn: 'environment_integration_id', // FK on base table
+  remote: {
+    table: 'environment_integration',
+    pk: 'id',
+    select: ['id', 'environment_id', 'integration_id'],
+  },
+  schema: EnvironmentIntegrationSchema,
+}
+```
+
+`localPk` remains supported for existing join configs.
+
+#### Chained (multi-hop) joins
+
+Nest `joins` inside a `JoinDef` to traverse multiple tables in one query:
+
+```typescript
+include: {
+  environment_integration: {
+    integration: true,
+  },
+}
+// → row.environment_integration.integration
+```
+
+#### Top-level `expose`
+
+Project joined columns onto the row root (e.g. for wire-compat APIs):
+
+```typescript
+createService({
+  // ...
+  expose: [
+    { from: '$environment_integration.environment_id', as: 'environment_id' },
+  ],
+})
+```
+
+#### Join-aware filters, sort, and count
+
+Filter, sort, and count on joined or exposed columns:
+
+```typescript
+await service.list({
+  auth,
+  where: { environment_id: { in: ['env-1'] } },
+  orderBy: [{ column: '$integration.name', direction: 'asc' }],
+  include: { environment_integration: { integration: true } },
+})
+
+await service.count({
+  auth,
+  where: { environment_id: 'env-1' },
+  include: { environment_integration: true },
+})
+```
+
+Use `$table` alias blocks in `where` for explicit qualification. Expose aliases
+(e.g. `environment_id`) are translated automatically.
+
+#### List vs detail projections
+
+Override joined columns per call via nested `include.select`:
+
+```typescript
+// list — stripped integration
+include: {
+  environment_integration: {
+    select: ['id', 'environment_id'],
+    integration: { select: ['id', 'name'] },
+  },
+}
+
+// detail — full configured columns
+include: { environment_integration: { integration: true } }
+```
+
 ### Field selection
 
 Limit the columns returned by `list` / `get` / `create` / `update` with a flat

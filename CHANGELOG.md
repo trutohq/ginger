@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-06-24
+
+### Added
+
+- **Joins v2:** `localColumn` for FK joins where the FK is on the base table (not the PK join pattern)
+- **Chained joins:** nested `joins` on `JoinDef` with tree-shaped `include` (`{ parent: { child: true } }`)
+- **`expose`:** project joined columns to the top-level row (`{ from: '$join.col', as: 'col' }`)
+- **Join-aware `where` / `orderBy` / `count`:** filter and sort on `$alias.column` and exposed aliases; `count({ include, where })` uses `COUNT(DISTINCT base.pk)` with the same join graph
+- **Scoped `get` on joined columns:** `get(id, { where: { environment_id: { in: [...] } } })` returns `null` when the join scope does not match
+- **Per-call join projections:** nested `include.select` overrides for list vs detail shapes
+- Collision-safe join SQL aliases: legacy `prefix_col` is kept unless it would collide with a base-table or expose column name (then `prefix__col`)
+
+### Changed
+
+- `include` accepts nested objects; boolean shorthand (`include: { profile: true }`) is unchanged
+- `CountParams` accepts optional `include` for join-aware counts
+- `JoinDef.localPk` is optional when `localColumn` is set
+
 ## [2.0.1] - 2026-06-11
 
 ### Changed

@@ -22,6 +22,11 @@ import {
   decodeCursor,
   encodeCursor,
 } from './pagination.js'
+import {
+  normalizeInclude,
+  resolveActiveJoins,
+  translateWhereForJoins,
+} from './joins.js'
 import type { Database } from './types.js'
 
 describe('Ginger Library - Comprehensive Tests', () => {
@@ -1284,7 +1289,7 @@ describe('Ginger Library - Comprehensive Tests', () => {
         // join columns. That accidentally also matched legitimate main
         // columns. With the collision-free implementation, `team_size` must
         // survive even though the join alias is `team` (so the SQL aliased
-        // join keys look like `team_id`, `team_name`, …).
+        // join keys look like `team_id`, `team_name`, … (or `team__id` only on collision).
         bunDb.exec(`ALTER TABLE users ADD COLUMN team_size INTEGER DEFAULT 0`)
         bunDb.exec(`UPDATE users SET team_size = 7 WHERE id = 1`)
 
@@ -2304,6 +2309,323 @@ describe('Ginger Library - Comprehensive Tests', () => {
           { auth: {} },
         ),
       ).rejects.toThrow()
+    })
+  })
+
+  describe('Joins v2 (FK, chained, expose, filters)', () => {
+    const IntegratedAccountRowSchema = z.object({
+      id: z.string(),
+      environment_integration_id: z.string(),
+      status: z.string(),
+      tenant_id: z.string(),
+    })
+
+    const EnvironmentIntegrationRowSchema = z.object({
+      id: z.string(),
+      environment_id: z.string(),
+      integration_id: z.string(),
+      is_beta: z.number(),
+    })
+
+    const IntegrationRowSchema = z.object({
+      id: z.string(),
+      name: z.string(),
+      config: z.string(),
+    })
+
+    const integratedAccountJoins = {
+      environment_integration: {
+        kind: 'one' as const,
+        localColumn: 'environment_integration_id',
+        remote: {
+          table: 'environment_integration',
+          pk: 'id',
+          select: ['id', 'environment_id', 'integration_id', 'is_beta'],
+        },
+        schema: EnvironmentIntegrationRowSchema,
+        joins: {
+          integration: {
+            kind: 'one' as const,
+            localColumn: 'integration_id',
+            remote: {
+              table: 'integration',
+              pk: 'id',
+              select: ['id', 'name', 'config'],
+            },
+            schema: IntegrationRowSchema,
+          },
+        },
+      },
+    }
+
+    let iaService: Service<any, any, any, any, any>
+
+    beforeEach(() => {
+      bunDb.exec(`
+        CREATE TABLE integrated_account (
+          id TEXT PRIMARY KEY,
+          environment_integration_id TEXT NOT NULL,
+          status TEXT NOT NULL,
+          tenant_id TEXT NOT NULL
+        );
+        CREATE TABLE environment_integration (
+          id TEXT PRIMARY KEY,
+          environment_id TEXT NOT NULL,
+          integration_id TEXT NOT NULL,
+          is_beta INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE integration (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          config TEXT
+        );
+        INSERT INTO integration VALUES
+          ('int-1', 'Salesforce', '{"label":"SF"}'),
+          ('int-2', 'HubSpot', '{"label":"HS"}');
+        INSERT INTO environment_integration VALUES
+          ('ei-1', 'env-1', 'int-1', 0),
+          ('ei-2', 'env-2', 'int-2', 1);
+        INSERT INTO integrated_account VALUES
+          ('ia-1', 'ei-1', 'active', 'tnt-1'),
+          ('ia-2', 'ei-2', 'active', 'tnt-1'),
+          ('ia-3', 'ei-1', 'inactive', 'tnt-2');
+      `)
+
+      iaService = createService({
+        table: 'integrated_account',
+        db,
+        rowSchema: IntegratedAccountRowSchema,
+        createSchema: z.object({
+          id: z.string(),
+          environment_integration_id: z.string(),
+          status: z.string(),
+          tenant_id: z.string(),
+        }),
+        updateSchema: z.object({
+          status: z.string().optional(),
+        }),
+        joins: integratedAccountJoins,
+        expose: [
+          {
+            from: '$environment_integration.environment_id',
+            as: 'environment_id',
+          },
+        ],
+      })
+    })
+
+    it('FK join via localColumn returns nested 2-hop data on get', async () => {
+      const row = await iaService.get('ia-1', {
+        auth: {},
+        include: {
+          environment_integration: {
+            integration: true,
+          },
+        },
+      })
+
+      expect(row).toEqual({
+        id: 'ia-1',
+        environment_integration_id: 'ei-1',
+        status: 'active',
+        tenant_id: 'tnt-1',
+        environment_id: 'env-1',
+        environment_integration: {
+          id: 'ei-1',
+          environment_id: 'env-1',
+          integration_id: 'int-1',
+          is_beta: 0,
+          integration: {
+            id: 'int-1',
+            name: 'Salesforce',
+            config: '{"label":"SF"}',
+          },
+        },
+      })
+    })
+
+    it('expose projects environment_id at top level', async () => {
+      const row = await iaService.get('ia-1', {
+        auth: {},
+        include: { environment_integration: true },
+      })
+
+      expect(row?.environment_id).toBe('env-1')
+      expect(row?.environment_integration?.environment_id).toBe('env-1')
+    })
+
+    it('filters on exposed environment_id via list where', async () => {
+      const page = await iaService.list({
+        auth: {},
+        where: { environment_id: { in: ['env-1'] } },
+        include: { environment_integration: { integration: true } },
+      })
+
+      expect(page.result.map((r) => r.id).sort()).toEqual(['ia-1', 'ia-3'])
+    })
+
+    it('count matches list filter on exposed column', async () => {
+      const count = await iaService.count({
+        auth: {},
+        where: { environment_id: 'env-2' },
+        include: { environment_integration: true },
+      })
+      const page = await iaService.list({
+        auth: {},
+        where: { environment_id: 'env-2' },
+        include: { environment_integration: true },
+      })
+
+      expect(count).toBe(page.result.length)
+      expect(count).toBe(1)
+    })
+
+    it('scoped get returns null when environment_id not in scope', async () => {
+      const row = await iaService.get('ia-1', {
+        auth: {},
+        where: { environment_id: { in: ['env-2'] } },
+        include: { environment_integration: true },
+      })
+
+      expect(row).toBeNull()
+    })
+
+    it('include select overrides strip integration on list', async () => {
+      const page = await iaService.list({
+        auth: {},
+        include: {
+          environment_integration: {
+            select: ['id', 'environment_id'],
+            integration: {
+              select: ['id', 'name'],
+            },
+          },
+        },
+      })
+
+      const ia1 = page.result.find((r) => r.id === 'ia-1')
+      expect(ia1?.environment_integration).toEqual({
+        id: 'ei-1',
+        environment_id: 'env-1',
+        integration: {
+          id: 'int-1',
+          name: 'Salesforce',
+        },
+      })
+      expect(ia1?.environment_integration?.integration?.config).toBeUndefined()
+    })
+
+    it('orders by joined column $integration.name', async () => {
+      const page = await iaService.list({
+        auth: {},
+        orderBy: [{ column: '$integration.name', direction: 'asc' }],
+        include: {
+          environment_integration: { integration: true },
+        },
+      })
+
+      expect(page.result.map((r) => r.id)).toEqual(['ia-2', 'ia-1', 'ia-3'])
+    })
+
+    it('orders by exposed environment_id column', async () => {
+      const page = await iaService.list({
+        auth: {},
+        orderBy: [{ column: 'environment_id', direction: 'asc' }],
+      })
+
+      expect(page.result.map((r) => r.id)).toEqual(['ia-1', 'ia-3', 'ia-2'])
+    })
+
+    it('count with expose filter works without explicit include', async () => {
+      const count = await iaService.count({
+        auth: {},
+        where: { environment_id: { in: ['env-1'] } },
+      })
+
+      expect(count).toBe(2)
+    })
+
+    it('paginates with join sort cursor round-trip', async () => {
+      const page1 = await iaService.list({
+        auth: {},
+        limit: 2,
+        orderBy: [{ column: 'id', direction: 'asc' }],
+        include: { environment_integration: true },
+      })
+
+      expect(page1.result).toHaveLength(2)
+      expect(page1.nextCursor).toBeDefined()
+
+      const page2 = await iaService.list({
+        auth: {},
+        limit: 2,
+        cursor: page1.nextCursor,
+        orderBy: [{ column: 'id', direction: 'asc' }],
+        include: { environment_integration: true },
+      })
+
+      expect(page2.result).toHaveLength(1)
+      expect(page2.prevCursor).toBeDefined()
+    })
+  })
+
+  describe('join column alias compatibility', () => {
+    it('keeps legacy prefix_col for standard joins', () => {
+      const resolved = resolveActiveJoins(
+        userJoins,
+        normalizeInclude({ profile: true }),
+        undefined,
+        'users',
+        undefined,
+        ['id', 'name', 'email', 'tenant_id', 'created_at', 'updated_at'],
+      )
+      const profile = resolved.find((r) => r.path === 'profile')!
+      expect(profile.columnAliases.bio).toBe('profile_bio')
+      expect(profile.columnAliases.avatar).toBe('profile_avatar')
+    })
+
+    it('uses prefix__col only when legacy alias collides with a base column', () => {
+      const resolved = resolveActiveJoins(
+        {
+          environment_integration: {
+            kind: 'one' as const,
+            localColumn: 'environment_integration_id',
+            remote: {
+              table: 'environment_integration',
+              pk: 'id',
+              select: ['id', 'environment_id'],
+            },
+            schema: z.object({ id: z.string(), environment_id: z.string() }),
+          },
+        },
+        normalizeInclude({ environment_integration: true }),
+        undefined,
+        'integrated_account',
+        undefined,
+        ['id', 'environment_integration_id', 'status'],
+      )
+      const ei = resolved.find((r) => r.path === 'environment_integration')!
+      expect(ei.columnAliases.id).toBe('environment_integration__id')
+      expect(ei.columnAliases.environment_id).toBe(
+        'environment_integration_environment_id',
+      )
+    })
+
+    it('drops prototype-polluting where keys in translateWhereForJoins', () => {
+      const protoPayload = JSON.parse(
+        '{"__proto__":{"polluted":true}}',
+      ) as Record<string, unknown>
+      const result = translateWhereForJoins(
+        { ...protoPayload, status: 'active' },
+        'integrated_account',
+        [],
+        undefined,
+      )
+
+      expect(result).toEqual({ status: 'active' })
+      expect(
+        Object.prototype.hasOwnProperty.call(Object.prototype, 'polluted'),
+      ).toBe(false)
     })
   })
 })

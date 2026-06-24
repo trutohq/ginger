@@ -22,7 +22,11 @@ import {
   decodeCursor,
   encodeCursor,
 } from './pagination.js'
-import { normalizeInclude, resolveActiveJoins } from './joins.js'
+import {
+  normalizeInclude,
+  resolveActiveJoins,
+  translateWhereForJoins,
+} from './joins.js'
 import type { Database } from './types.js'
 
 describe('Ginger Library - Comprehensive Tests', () => {
@@ -2605,6 +2609,23 @@ describe('Ginger Library - Comprehensive Tests', () => {
       expect(ei.columnAliases.environment_id).toBe(
         'environment_integration_environment_id',
       )
+    })
+
+    it('drops prototype-polluting where keys in translateWhereForJoins', () => {
+      const protoPayload = JSON.parse(
+        '{"__proto__":{"polluted":true}}',
+      ) as Record<string, unknown>
+      const result = translateWhereForJoins(
+        { ...protoPayload, status: 'active' },
+        'integrated_account',
+        [],
+        undefined,
+      )
+
+      expect(result).toEqual({ status: 'active' })
+      expect(
+        Object.prototype.hasOwnProperty.call(Object.prototype, 'polluted'),
+      ).toBe(false)
     })
   })
 })

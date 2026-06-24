@@ -2,6 +2,24 @@ import { compileFilter, sql } from '@truto/sqlite-builder'
 import { CursorError, SqlBuilderError } from './errors.js'
 import type { ExposeDef, IncludeMap, JoinDef, OrderBy } from './types.js'
 
+/** Keys that must never be used as dynamic object property names. */
+const UNSAFE_OBJECT_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
+
+/** True when `key` must not be used for dynamic assignment on a plain object. */
+export function isUnsafeObjectKey(key: string): boolean {
+  return UNSAFE_OBJECT_KEYS.has(key)
+}
+
+function safeSet(
+  target: Record<string, unknown>,
+  key: string,
+  value: unknown,
+): boolean {
+  if (isUnsafeObjectKey(key)) return false
+  target[key] = value
+  return true
+}
+
 /** Normalized include tree node after parsing boolean / object include specs. */
 export interface NormalizedIncludeNode {
   enabled: boolean
@@ -48,6 +66,7 @@ export function normalizeInclude(
 
   const out: Record<string, NormalizedIncludeNode> = {}
   for (const [key, value] of Object.entries(include)) {
+    if (isUnsafeObjectKey(key)) continue
     const node = normalizeIncludeValue(value)
     if (node?.enabled) out[key] = node
   }
@@ -69,7 +88,7 @@ function normalizeIncludeValue(
   const children: Record<string, NormalizedIncludeNode> = {}
 
   for (const [key, childVal] of Object.entries(obj)) {
-    if (key === 'select') continue
+    if (key === 'select' || isUnsafeObjectKey(key)) continue
     const child = normalizeIncludeValue(childVal as IncludeMap[string])
     if (child?.enabled) children[key] = child
   }
@@ -438,37 +457,55 @@ export function translateWhereForJoins(
   const { exposeColumns } = buildJoinFilterContext(resolved, expose, baseTable)
   const joinedTables = new Set(resolved.map((r) => r.sqlTable))
 
-  const out: Record<string, unknown> = {}
-  const aliasBlocks: Record<string, Record<string, unknown>> = {}
+  const out: Record<string, unknown> = Object.create(null) as Record<
+    string,
+    unknown
+  >
+  const aliasBlocks = new Map<string, Record<string, unknown>>()
 
   function mergeBlock(table: string, filter: Record<string, unknown>): void {
-    if (!aliasBlocks[table]) aliasBlocks[table] = {}
-    Object.assign(aliasBlocks[table]!, filter)
+    if (isUnsafeObjectKey(table)) return
+    let block = aliasBlocks.get(table)
+    if (!block) {
+      block = Object.create(null) as Record<string, unknown>
+      aliasBlocks.set(table, block)
+    }
+    for (const [filterKey, filterValue] of Object.entries(filter)) {
+      safeSet(block, filterKey, filterValue)
+    }
   }
 
   for (const [key, value] of Object.entries(where)) {
+    if (isUnsafeObjectKey(key)) continue
+
     if (key === 'and' || key === 'or') {
-      out[key] = (value as unknown[]).map((sub) =>
-        typeof sub === 'object' && sub !== null
-          ? translateWhereForJoins(
-              sub as Record<string, unknown>,
-              baseTable,
-              resolved,
-              expose,
-            )
-          : sub,
+      safeSet(
+        out,
+        key,
+        (value as unknown[]).map((sub) =>
+          typeof sub === 'object' && sub !== null
+            ? translateWhereForJoins(
+                sub as Record<string, unknown>,
+                baseTable,
+                resolved,
+                expose,
+              )
+            : sub,
+        ),
       )
       continue
     }
 
     if (key.startsWith('$')) {
-      out[key] = value
+      safeSet(out, key, value)
       continue
     }
 
     const exposeSource = exposeColumns.get(key)
     if (exposeSource) {
-      mergeBlock(exposeSource.table, { [exposeSource.column]: value })
+      if (!isUnsafeObjectKey(exposeSource.column)) {
+        mergeBlock(exposeSource.table, { [exposeSource.column]: value })
+      }
       continue
     }
 
@@ -476,25 +513,39 @@ export function translateWhereForJoins(
     if (key.includes('.')) {
       const [tableOrJoin, ...rest] = key.split('.')
       const col = rest.join('.')
-      const byPath = resolved.find(
-        (r) => r.path === tableOrJoin || r.name === tableOrJoin,
-      )
-      if (byPath) {
-        mergeBlock(byPath.sqlTable, { [col]: value })
-        continue
-      }
-      if (joinedTables.has(tableOrJoin!)) {
-        mergeBlock(tableOrJoin!, { [col]: value })
-        continue
+      if (!isUnsafeObjectKey(col)) {
+        const byPath = resolved.find(
+          (r) => r.path === tableOrJoin || r.name === tableOrJoin,
+        )
+        if (byPath) {
+          mergeBlock(byPath.sqlTable, { [col]: value })
+          continue
+        }
+        if (tableOrJoin && joinedTables.has(tableOrJoin)) {
+          mergeBlock(tableOrJoin, { [col]: value })
+          continue
+        }
       }
     }
 
-    out[key] = value
+    safeSet(out, key, value)
   }
 
-  for (const [table, filter] of Object.entries(aliasBlocks)) {
+  for (const [table, filter] of aliasBlocks) {
     const blockKey = `$${table}`
-    out[blockKey] = { ...(out[blockKey] as Record<string, unknown>), ...filter }
+    const existing = out[blockKey]
+    const merged = Object.create(null) as Record<string, unknown>
+    if (typeof existing === 'object' && existing !== null) {
+      for (const [k, v] of Object.entries(
+        existing as Record<string, unknown>,
+      )) {
+        safeSet(merged, k, v)
+      }
+    }
+    for (const [k, v] of Object.entries(filter)) {
+      safeSet(merged, k, v)
+    }
+    safeSet(out, blockKey, merged)
   }
 
   return out

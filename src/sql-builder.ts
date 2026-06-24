@@ -4,6 +4,7 @@ import {
   buildExposeSelectColumns,
   buildJoinFragments,
   buildJoinSelectColumns,
+  isUnsafeObjectKey,
   legacyJoinColumnAlias,
   resolveOrderByColumn,
   translateWhereForJoins,
@@ -424,8 +425,8 @@ export function buildSelectById(
 
     for (const [key, value] of Object.entries(translated)) {
       if (key.startsWith('$')) {
-        joinScope[key] = value
-      } else {
+        if (!isUnsafeObjectKey(key.slice(1))) joinScope[key] = value
+      } else if (!isUnsafeObjectKey(key)) {
         baseScope[key] = value
       }
     }

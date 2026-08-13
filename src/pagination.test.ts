@@ -1,3 +1,4 @@
+import { Database as BunDatabase } from 'bun:sqlite'
 import { describe, expect, it } from 'vitest'
 import { CursorError } from './errors.js'
 import {
@@ -255,6 +256,31 @@ describe('Pagination System', () => {
 
       expect(() => buildCursorConditions(cursor)).toThrow(CursorError)
     })
+
+    it('should prefix every branch (including the last column) with equality on all earlier columns', () => {
+      // Regression test: for ORDER BY a DESC, b DESC, c DESC, correct keyset
+      // pagination requires
+      //   (a < ?) OR (a = ? AND b < ?) OR (a = ? AND b = ? AND c < ?)
+      // The bug emitted a bare `c < ?` for the last column with no equality
+      // prefix on `a`/`b`, so a row with a different `a` but a smaller `c`
+      // would leak onto the page even though it doesn't belong there.
+      const cursor: CursorToken = {
+        orderBy: [
+          { column: 'a', direction: 'desc' },
+          { column: 'b', direction: 'desc' },
+          { column: 'c', direction: 'desc' },
+        ],
+        values: [1, 2, 3],
+        direction: 'next',
+      }
+
+      const result = buildCursorConditions(cursor)
+
+      expect(result.text).toBe(
+        '("a" < ?) OR ("a" = ? AND "b" < ?) OR ("a" = ? AND "b" = ? AND "c" < ?)',
+      )
+      expect(result.values).toEqual([1, 1, 2, 1, 2, 3])
+    })
   })
 
   describe('getDefaultOrderBy', () => {
@@ -302,6 +328,87 @@ describe('Pagination System', () => {
       expect(() => validateOrderBy(orderBy, allowedColumns)).toThrow(
         CursorError,
       )
+    })
+  })
+
+  describe('keyset pagination correctness (regression)', () => {
+    it('should page through duplicate values in the first sort column without skipping or repeating rows', () => {
+      // Reproduces the real-world failure mode: ORDER BY a DESC, id DESC where
+      // `a` (e.g. created_at) repeats across rows and `id` is the unique
+      // tiebreaker. With the bug (`a < ? OR id < ?`), a row from a different
+      // `a` group could satisfy `id < cursor_id` and leak onto the page, or a
+      // row could be skipped, and paging could fail to terminate.
+      const bunDb = new BunDatabase(':memory:')
+      bunDb.exec(`
+        CREATE TABLE items (
+          id INTEGER PRIMARY KEY,
+          a INTEGER NOT NULL
+        );
+      `)
+
+      // Deliberately many duplicate `a` values, with `id` NOT correlated with
+      // `a` (ids are assigned out of `a` order within and across groups). If
+      // `id` happened to increase in step with `a`, sorting by `id` alone
+      // would coincide with sorting by `(a, id)` and the bug's dropped
+      // equality prefix (effectively `a < ? OR id < ?`) would never surface —
+      // this shape is required to actually exercise the bug.
+      const rows: Array<{ id: number; a: number }> = [
+        { id: 5, a: 1 },
+        { id: 2, a: 1 },
+        { id: 8, a: 1 },
+        { id: 1, a: 2 },
+        { id: 9, a: 2 },
+        { id: 3, a: 3 },
+        { id: 7, a: 3 },
+        { id: 4, a: 3 },
+        { id: 10, a: 3 },
+        { id: 6, a: 4 },
+      ]
+      const insert = bunDb.prepare('INSERT INTO items (id, a) VALUES (?, ?)')
+      for (const row of rows) insert.run(row.id, row.a)
+
+      const orderBy: OrderBy[] = [
+        { column: 'a', direction: 'desc' },
+        { column: 'id', direction: 'desc' },
+      ]
+      const expectedOrder = [...rows]
+        .sort((x, y) => y.a - x.a || y.id - x.id)
+        .map((r) => r.id)
+
+      const pageSize = 3
+      const seen: number[] = []
+      let cursor: CursorToken | undefined
+      let iterations = 0
+      // Bound the loop generously so a non-terminating bug fails the test
+      // instead of hanging the suite.
+      const maxIterations = Math.ceil(rows.length / pageSize) + 3
+
+      while (iterations < maxIterations) {
+        iterations++
+
+        const conditions = cursor
+          ? buildCursorConditions(cursor)
+          : { text: '', values: [] as unknown[] }
+        const whereClause = conditions.text ? `WHERE ${conditions.text}` : ''
+        const query = bunDb.prepare(
+          `SELECT id, a FROM items ${whereClause} ORDER BY a DESC, id DESC LIMIT ${pageSize}`,
+        )
+        const page = query.all(...conditions.values) as Array<{
+          id: number
+          a: number
+        }>
+
+        if (page.length === 0) break
+
+        seen.push(...page.map((r) => r.id))
+
+        const last = page[page.length - 1]!
+        cursor = createCursor(last, orderBy, 'next')
+      }
+
+      expect(iterations).toBeLessThan(maxIterations)
+      expect(seen).toEqual(expectedOrder)
+      expect(new Set(seen).size).toBe(seen.length) // no repeats
     })
   })
 

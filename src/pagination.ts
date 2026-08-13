@@ -148,8 +148,8 @@ export function buildCursorConditions(
     const useGreaterThan =
       (direction === 'next') === (order.direction === 'asc')
 
-    if (i === orderBy.length - 1) {
-      // Last column: simple comparison.
+    if (orderBy.length === 1) {
+      // Single-column order: simple comparison, no equality prefix possible.
       // `toBindableValue()` coerces/validates the bound value and throws on
       // non-scalar objects, so it can never be treated as a raw fragment.
       conditions.push(
@@ -158,11 +158,16 @@ export function buildCursorConditions(
           : sql`${columnIdent} < ${toBindableValue(value)}`,
       )
     } else {
-      // Multi-column: build composite condition
-      // (col1 = ? AND col2 = ? AND ... AND colN > ?) OR
-      // (col1 = ? AND col2 = ? AND ... AND colN-1 > ?) OR
-      // ...
-      // (col1 > ?)
+      // Multi-column: build composite condition, one branch per order
+      // column, each pinning every earlier column to its cursor value —
+      // (col1 > ?) OR
+      // (col1 = ? AND col2 > ?) OR
+      // (col1 = ? AND col2 = ? AND col3 > ?) OR ...
+      // This applies to every column, including the last: without the
+      // equality prefix on the earlier columns, a row whose later column
+      // happens to satisfy the bare comparison would leak onto this page
+      // even though it doesn't belong there under the full ordering,
+      // causing pages to overlap or skip rows.
       const equalityConditions: ReturnType<typeof sql>[] = []
 
       for (let j = 0; j <= i; j++) {

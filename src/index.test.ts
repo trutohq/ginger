@@ -632,6 +632,43 @@ describe('Ginger Library - Comprehensive Tests', () => {
         }
       })
 
+      it('should paginate over non-latin1 names without throwing', async () => {
+        // Regression: the cursor carries the value of the column being sorted
+        // on, so ordering by a name containing CJK/emoji used to throw
+        // `InvalidCharacterError` out of btoa and 500 the request on page 2.
+        const names = ['Ana José', 'Привет', '张伟', '日本語 🔐', 'émile']
+        for (const [i, name] of names.entries()) {
+          await testService.create(
+            {
+              name,
+              email: `unicode-${i}@test.com`,
+              tenant_id: 'tenant-unicode',
+            },
+            { auth: {} },
+          )
+        }
+
+        const orderBy = [{ column: 'name' as const, direction: 'asc' as const }]
+        const seen: string[] = []
+        let cursor: string | undefined
+
+        // Walk every page; each hop encodes a cursor from the previous row's name.
+        for (let page = 0; page < 10; page++) {
+          const res = await testService.list({
+            auth: {},
+            where: { tenant_id: 'tenant-unicode' },
+            orderBy,
+            limit: 2,
+            ...(cursor ? { cursor } : {}),
+          })
+          seen.push(...res.result.map((r: { name: string }) => r.name))
+          if (!res.nextCursor) break
+          cursor = res.nextCursor
+        }
+
+        expect(seen.sort()).toEqual([...names].sort())
+      })
+
       it('should handle cursor conditions correctly', () => {
         const token = {
           orderBy: [{ column: 'id', direction: 'asc' as const }],

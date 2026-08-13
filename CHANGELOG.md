@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Encryption of large values:** `encrypt` packed the ciphertext with `btoa(String.fromCharCode(...bytes))`, which spreads every byte into an argument list. A secret field past the engine's argument limit (roughly 256KB on workerd) threw `Maximum call stack size exceeded` and surfaced as a 500 on the write path. Base64 conversion now runs in fixed-size chunks in both directions; the encoding is byte-for-byte identical, so previously stored ciphertext decrypts unchanged.
+- **Pagination over non-latin1 values:** cursors carry the values of the columns being sorted on, and `JSON.stringify` emits non-ASCII characters raw, so listing a table ordered by a text column containing a CJK name or an emoji threw `InvalidCharacterError` out of `btoa` — page 2 of the list 500'd. Code units above U+00FF are now escaped as `\uXXXX` before encoding, which is exactly the set `btoa` rejected, so cursors already in flight keep their identical byte representation and `decodeCursor` is unchanged. Deliberately not UTF-8: that would have re-encoded the latin1 range (`José`) that `btoa` accepts today, silently changing what a live cursor decodes to.
 - **Keyset pagination:** missing equality prefix on the final cursor column could return rows already seen on a previous page when ordering by multiple columns.
 
 ## [2.1.0] - 2026-06-24

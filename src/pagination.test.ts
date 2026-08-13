@@ -617,3 +617,126 @@ describe('Pagination System', () => {
     })
   })
 })
+
+describe('cursor encoding of non-ASCII values', () => {
+  // The pre-fix encoder, verbatim. Every cursor currently in flight was
+  // produced by this, so the new encoder must agree with it on every input it
+  // accepts — the inputs it rejects are the bug.
+  const legacyEncode = (token: CursorToken): string =>
+    btoa(JSON.stringify(token))
+
+  const tokenFor = (value: unknown): CursorToken =>
+    ({
+      orderBy: [{ column: 'name', direction: 'asc' }],
+      values: [value],
+      direction: 'next',
+    }) as CursorToken
+
+  describe('compatibility with cursors already in flight', () => {
+    it('is byte-for-byte identical for every code unit btoa accepts (U+0000-U+00FF)', () => {
+      // This is the crux: latin1 characters above U+007F encode as ONE byte
+      // under the existing scheme, and btoa accepts them, so such cursors are
+      // live today. Any scheme that re-encodes them (UTF-8 would make them two
+      // bytes) silently changes the value a live cursor decodes to.
+      for (let code = 0; code <= 0xff; code++) {
+        const token = tokenFor(`a${String.fromCharCode(code)}z`)
+        expect(encodeCursor(token)).toBe(legacyEncode(token))
+      }
+    })
+
+    it('is byte-for-byte identical for the whole latin1 range at once', () => {
+      const latin1 = Array.from({ length: 256 }, (_, i) =>
+        String.fromCharCode(i),
+      ).join('')
+      const token = tokenFor(latin1)
+
+      expect(encodeCursor(token)).toBe(legacyEncode(token))
+      expect(decodeCursor(encodeCursor(token)).values[0]).toBe(latin1)
+    })
+
+    it('is byte-for-byte identical for realistic values', () => {
+      for (const value of [
+        'alice',
+        'José',
+        'Ã©',
+        'Müller',
+        'ñ',
+        'a/b+c=d',
+        '',
+        null,
+        42,
+        true,
+      ]) {
+        const token = tokenFor(value)
+        expect(encodeCursor(token)).toBe(legacyEncode(token))
+      }
+    })
+
+    it('decodes cursors produced by the previous encoder unchanged', () => {
+      for (const value of ['alice', 'José', 'Ã©', 'a/b+c=d']) {
+        const token = tokenFor(value)
+        expect(decodeCursor(legacyEncode(token)).values[0]).toBe(value)
+      }
+    })
+  })
+
+  describe('values the previous encoder could not encode', () => {
+    // Regression: cursors carry the values of the column being sorted on, so
+    // paginating over a text column holding any of these used to 500 on page 2.
+    const nonLatin1: Array<[string, string]> = [
+      ['CJK', '张伟'],
+      ['Japanese', '日本語のツールボックス'],
+      ['emoji', 'prod 🔐 connection'],
+      ['Cyrillic', 'Привет'],
+      ['mixed', 'José 日本 🔐'],
+      ['astral only', '😀😀😀'],
+    ]
+
+    it.each(nonLatin1)('previously threw on %s', (_name, value) => {
+      expect(() => legacyEncode(tokenFor(value))).toThrow()
+    })
+
+    it.each(nonLatin1)('now round-trips %s', (_name, value) => {
+      const token = tokenFor(value)
+      const encoded = encodeCursor(token)
+
+      expect(encoded).toMatch(/^[A-Za-z0-9+/]*={0,2}$/)
+      expect(decodeCursor(encoded).values[0]).toBe(value)
+    })
+
+    it('round-trips a long mixed-script value', () => {
+      const long = '日本語😀José-'.repeat(4000)
+      expect(long.length).toBeGreaterThan(0x8000)
+
+      const token = tokenFor(long)
+      expect(decodeCursor(encodeCursor(token)).values[0]).toBe(long)
+    })
+
+    it('round-trips multi-column cursors with non-ASCII values', () => {
+      const token: CursorToken = {
+        orderBy: [
+          { column: 'name', direction: 'asc' },
+          { column: 'id', direction: 'desc' },
+        ],
+        values: ['日本 🔐', 'ID-Ünïcødé'],
+        direction: 'prev',
+      }
+
+      expect(decodeCursor(encodeCursor(token))).toEqual(token)
+    })
+
+    it('still rejects tampered payloads', () => {
+      // The escaping only fires inside JSON string literals, so it must not
+      // weaken the structural validation the decoder relies on.
+      const smuggled = btoa(
+        JSON.stringify({
+          orderBy: [{ column: 'name', direction: 'asc' }],
+          values: [{ text: 'DROP TABLE users', values: [] }],
+          direction: 'next',
+        }),
+      )
+
+      expect(() => decodeCursor(smuggled)).toThrow(CursorError)
+    })
+  })
+})

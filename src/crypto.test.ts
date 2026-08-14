@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it } from 'bun:test'
 import {
+  base64ToBytes,
+  bytesToBase64,
   decrypt,
   decryptSecrets,
   DefaultKeyProvider,
@@ -1137,4 +1139,120 @@ describe('crypto.ts', () => {
       expect(current).toEqual(testData)
     })
   })
+})
+
+describe('base64 conversion', () => {
+  // The pre-fix implementations, reproduced verbatim. Every already-stored
+  // ciphertext in production was produced by `legacyBytesToBase64`, so the new
+  // helpers have to agree with these exactly or existing data stops decrypting.
+  const legacyBytesToBase64 = (bytes: Uint8Array): string =>
+    btoa(String.fromCharCode(...bytes))
+  const legacyBase64ToBytes = (b64: string): Uint8Array =>
+    new Uint8Array(
+      atob(b64)
+        .split('')
+        .map((char) => char.charCodeAt(0)),
+    )
+
+  const CHUNK = 0x8000
+
+  // Sizes around the chunk boundary matter because the chunk size is not a
+  // multiple of 3: base64-encoding per chunk instead of concatenating the
+  // binary string first would produce different (padded) output.
+  const sizes = [
+    0,
+    1,
+    2,
+    3,
+    255,
+    256,
+    1023,
+    CHUNK - 1,
+    CHUNK,
+    CHUNK + 1,
+    CHUNK + 2,
+    2 * CHUNK,
+    2 * CHUNK + 1,
+    3 * CHUNK + 7,
+    256 * 1024, // lower end of the range that overflowed in production
+  ]
+
+  // Covers every byte value 0..255 including embedded nulls and bytes > 127.
+  // The odd stride keeps chunk boundaries from always landing on the same byte.
+  const patterned = (n: number): Uint8Array => {
+    const bytes = new Uint8Array(n)
+    for (let i = 0; i < n; i++) {
+      bytes[i] = (i * 31 + 17) & 0xff
+    }
+    return bytes
+  }
+
+  it.each(sizes)(
+    'encodes %i bytes byte-for-byte identically to the previous implementation',
+    (size) => {
+      const bytes = patterned(size)
+      expect(bytesToBase64(bytes)).toBe(legacyBytesToBase64(bytes))
+    },
+  )
+
+  it.each(sizes)(
+    'decodes %i bytes identically to the previous implementation',
+    (size) => {
+      const b64 = legacyBytesToBase64(patterned(size))
+      expect(base64ToBytes(b64)).toEqual(legacyBase64ToBytes(b64))
+    },
+  )
+
+  it.each(sizes)('round-trips %i bytes', (size) => {
+    const bytes = patterned(size)
+    expect(base64ToBytes(bytesToBase64(bytes))).toEqual(bytes)
+  })
+
+  it('handles all-null and all-high byte runs', () => {
+    for (const fill of [0x00, 0x7f, 0x80, 0xff]) {
+      const bytes = new Uint8Array(CHUNK + 5).fill(fill)
+      expect(bytesToBase64(bytes)).toBe(legacyBytesToBase64(bytes))
+      expect(base64ToBytes(bytesToBase64(bytes))).toEqual(bytes)
+    }
+  })
+
+  it('encodes payloads the previous implementation could not encode at all', () => {
+    // 4MB is past the argument-spread ceiling on every engine we run on
+    // (workerd overflows around 125k arguments, Bun around 640k).
+    const bytes = patterned(4 * 1024 * 1024)
+    expect(() => legacyBytesToBase64(bytes)).toThrow()
+
+    // The legacy *decoder* still works, so decoding the new encoding with it
+    // proves the new encoding is the canonical base64 of exactly these bytes —
+    // byte-for-byte compatibility at a size the legacy encoder cannot reach.
+    expect(legacyBase64ToBytes(bytesToBase64(bytes))).toEqual(bytes)
+  })
+})
+
+describe('encrypt/decrypt with large payloads', () => {
+  let keyProvider: DefaultKeyProvider
+
+  beforeEach(async () => {
+    keyProvider = new DefaultKeyProvider({ default: await generateSecretKey() })
+  })
+
+  // Regression: a customer-supplied secret in this size range made `encrypt`
+  // throw "Maximum call stack size exceeded" and surface as a 500.
+  it.each([256 * 1024, 1024 * 1024, 4 * 1024 * 1024])(
+    'encrypts and decrypts a %i byte payload',
+    async (size) => {
+      const plaintext = 'a'.repeat(size)
+      const encrypted = await encrypt(plaintext, keyProvider)
+      expect(await decrypt(encrypted, keyProvider)).toBe(plaintext)
+    },
+    30_000,
+  )
+
+  it('encrypts and decrypts large multi-byte UTF-8 content', async () => {
+    // Multi-byte characters make the ciphertext longer than the string length,
+    // pushing it well past the chunk boundary.
+    const plaintext = '🔐日本語'.repeat(200_000)
+    const encrypted = await encrypt(plaintext, keyProvider)
+    expect(await decrypt(encrypted, keyProvider)).toBe(plaintext)
+  }, 30_000)
 })

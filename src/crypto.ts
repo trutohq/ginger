@@ -2,6 +2,49 @@ import { EncryptionError } from './errors.js'
 import type { KeyProvider, SecretFieldDef } from './types.js'
 
 /**
+ * Number of bytes converted per `String.fromCharCode` call.
+ *
+ * `String.fromCharCode(...bytes)` spreads every byte into the argument list,
+ * so a large payload blows the engine's argument limit and throws
+ * "Maximum call stack size exceeded" (observed between ~256KB and 1MB, which
+ * is customer-reachable through any large secret field). Chunking keeps the
+ * argument count bounded and is byte-for-byte identical: `fromCharCode` maps
+ * each code unit independently, so concatenating the per-chunk strings yields
+ * exactly the string the single spread call produced.
+ */
+const BASE64_CHUNK_SIZE = 0x8000
+
+/**
+ * Encode bytes as base64 with no argument-count ceiling.
+ *
+ * Produces the same output as `btoa(String.fromCharCode(...bytes))` for every
+ * input, including the sizes where that expression throws.
+ */
+export function bytesToBase64(bytes: Uint8Array): string {
+  let binary = ''
+  for (let i = 0; i < bytes.length; i += BASE64_CHUNK_SIZE) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + BASE64_CHUNK_SIZE))
+  }
+  return btoa(binary)
+}
+
+/**
+ * Decode base64 to bytes.
+ *
+ * Same result as `new Uint8Array(atob(b64).split('').map(c => c.charCodeAt(0)))`
+ * — `atob` only ever yields latin1 code units — without materialising a
+ * one-character-string array per byte.
+ */
+export function base64ToBytes(b64: string): Uint8Array {
+  const binary = atob(b64)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i)
+  }
+  return bytes
+}
+
+/**
  * Default key provider that accepts keys as constructor parameters
  */
 export class DefaultKeyProvider implements KeyProvider {
@@ -30,11 +73,7 @@ export class DefaultKeyProvider implements KeyProvider {
 
     try {
       // Convert base64 secret to ArrayBuffer
-      const keyData = new Uint8Array(
-        atob(secretKey)
-          .split('')
-          .map((char) => char.charCodeAt(0)),
-      )
+      const keyData = base64ToBytes(secretKey)
 
       // SECURITY: enforce a 256-bit key. The library advertises AES-256-GCM;
       // silently accepting a shorter (e.g. 128-bit) key would weaken the
@@ -80,7 +119,7 @@ export async function generateSecretKey(): Promise<string> {
   )
 
   const exported = await crypto.subtle.exportKey('raw', key)
-  return btoa(String.fromCharCode(...new Uint8Array(exported)))
+  return bytesToBase64(new Uint8Array(exported))
 }
 
 /**
@@ -106,8 +145,8 @@ export async function encrypt(
 
     // Pack as "kid:iv:cipher" with base64 encoding
     const kidB64 = btoa(keyId)
-    const ivB64 = btoa(String.fromCharCode(...iv))
-    const cipherB64 = btoa(String.fromCharCode(...new Uint8Array(ciphertext)))
+    const ivB64 = bytesToBase64(iv)
+    const cipherB64 = bytesToBase64(new Uint8Array(ciphertext))
 
     return `${kidB64}:${ivB64}:${cipherB64}`
   } catch (error) {
@@ -139,16 +178,8 @@ export async function decrypt(
     }
 
     const keyId = atob(kidB64)
-    const iv = new Uint8Array(
-      atob(ivB64)
-        .split('')
-        .map((char) => char.charCodeAt(0)),
-    )
-    const ciphertext = new Uint8Array(
-      atob(cipherB64)
-        .split('')
-        .map((char) => char.charCodeAt(0)),
-    )
+    const iv = base64ToBytes(ivB64)
+    const ciphertext = base64ToBytes(cipherB64)
 
     const key = await keyProvider.getKey(keyId)
     const decrypted = await crypto.subtle.decrypt(

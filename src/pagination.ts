@@ -8,7 +8,28 @@ import type { CursorToken, OrderBy } from './types.js'
  */
 export function encodeCursor(token: CursorToken): string {
   try {
-    const json = JSON.stringify(token)
+    // `btoa` only accepts code units <= 0xFF, and `JSON.stringify` emits
+    // non-ASCII characters raw. Cursors carry the values of the columns being
+    // sorted on, so paginating over any text column holding a CJK name or an
+    // emoji used to throw `InvalidCharacterError` and 500 the request.
+    //
+    // We escape exactly the code units `btoa` rejects (> 0xFF) as `\uXXXX`.
+    // That range is precisely the set of inputs that could not be encoded
+    // before, so every cursor that encodes today keeps its byte-for-byte
+    // identical representation and stays decodable. Deliberately NOT UTF-8:
+    // that would re-encode the latin1 range (U+0080–U+00FF, e.g. "José") which
+    // `btoa` accepts today, so cursors already in flight would decode to a
+    // different value — and it is not even distinguishable on decode, since
+    // legacy("Ã©") and utf8("é") are the same bytes.
+    //
+    // Escaping only ever fires inside JSON string literals; all JSON structural
+    // characters are ASCII. `decodeCursor` needs no counterpart — `JSON.parse`
+    // already turns `\uXXXX` back into the original character.
+    const json = JSON.stringify(token).replace(
+      // Matches exactly the code units btoa rejects (>= U+0100).
+      /[\u0100-\uffff]/g,
+      (char) => '\\u' + char.charCodeAt(0).toString(16).padStart(4, '0'),
+    )
     return btoa(json)
   } catch (error) {
     throw new CursorError(

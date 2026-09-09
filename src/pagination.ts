@@ -219,7 +219,26 @@ export function buildCursorConditions(
     }
   }
 
-  return conditions.length > 0 ? sql.join(conditions, ' OR ') : sql``
+  // Parenthesised, because the caller ANDs this with its own WHERE.
+  //
+  // These conditions are OR-joined, and SQL binds AND tighter than OR. Returned
+  // bare, `WHERE job_id = ? AND <cursor>` parses as
+  //
+  //   (job_id = ? AND created_at < ?) OR (created_at = ? AND id < ?)
+  //
+  // and the second disjunct carries NO filter — so a paginated, filtered list
+  // returns rows belonging to other records. Measured on a real database: a
+  // job with 640 config keys came back with 645, the extra five belonging to a
+  // different job, and only on the page where the tie-break disjunct matched.
+  //
+  // It needs two or more order-by columns to be reachable, since a single
+  // column produces one condition and no OR. Any table whose default ordering
+  // is a composite primary key is therefore exposed by default.
+  if (conditions.length === 0) return sql``
+  // One condition needs no parentheses and gets none, so the emitted SQL for
+  // single-column ordering — the common case — is unchanged.
+  if (conditions.length === 1) return conditions[0]!
+  return sql`(${sql.join(conditions, ' OR ')})`
 }
 
 /**

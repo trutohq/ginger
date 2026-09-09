@@ -615,6 +615,48 @@ describe('Pagination System', () => {
       expect(result.text).toMatch(/^"[^"]*"\."[^"]*"\s*>\s*\?$/)
       expect(result.values).toEqual([10])
     })
+
+    // A caller ANDs this fragment with its own WHERE, and SQL binds AND tighter
+    // than OR. Unparenthesised, `WHERE job_id = ? AND <cursor>` parses as
+    //
+    //   (job_id = ? AND created_at < ?) OR (created_at = ? AND id < ?)
+    //
+    // and the second disjunct carries NO filter, so a paginated filtered list
+    // returns rows belonging to OTHER records. Measured against a real
+    // database before this was written: a job with 640 config keys came back
+    // with 645, the extra five belonging to a different job, and only on the
+    // page where the tie-break disjunct matched.
+    it('parenthesises a multi-column condition so an outer AND cannot escape it', () => {
+      const cursor: CursorToken = {
+        orderBy: [
+          { column: 'created_at', direction: 'desc' },
+          { column: 'id', direction: 'desc' },
+        ],
+        values: ['2026-01-01T00:00:00.000Z', 10],
+        direction: 'next',
+      }
+
+      const result = buildCursorConditions(cursor)
+
+      expect(result.text).toContain(' OR ')
+      expect(result.text.startsWith('(')).toBe(true)
+      expect(result.text.endsWith(')')).toBe(true)
+
+      // The point is not the brackets, it is that ANDing cannot split the OR.
+      // Balance-check the outer pair rather than trusting the ends.
+      let depth = 0
+      let closedEarly = false
+      for (const ch of result.text) {
+        if (ch === '(') depth++
+        else if (ch === ')') {
+          depth--
+          if (depth === 0) closedEarly = true
+        }
+      }
+      expect(depth).toBe(0)
+      const lastClose = result.text.lastIndexOf(')')
+      expect(closedEarly && lastClose === result.text.length - 1).toBe(true)
+    })
   })
 })
 

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.2]
+
+### Security
+
+- **Cursor conditions escaped the caller's `where`:** `buildCursorConditions` OR-joined its conditions and returned them bare, and `buildSelect` ANDs that fragment with the caller's `where`. SQL binds `AND` tighter than `OR`, so with two or more order-by columns every branch after the first `OR` was evaluated without the caller's filter, and a filtered, paginated list could return rows the filter excludes. The OR-chain is now parenthesised. Single-column ordering emits byte-identical SQL, and cursor tokens are unchanged, so cursors already in flight keep working.
+
 ## [2.1.1]
 
 ### Fixed

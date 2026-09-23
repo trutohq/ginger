@@ -276,8 +276,10 @@ describe('Pagination System', () => {
 
       const result = buildCursorConditions(cursor)
 
+      // The outer pair is the precedence fix: the caller ANDs this fragment
+      // with its own WHERE, so the OR-chain has to arrive bracketed.
       expect(result.text).toBe(
-        '("a" < ?) OR ("a" = ? AND "b" < ?) OR ("a" = ? AND "b" = ? AND "c" < ?)',
+        '(("a" < ?) OR ("a" = ? AND "b" < ?) OR ("a" = ? AND "b" = ? AND "c" < ?))',
       )
       expect(result.values).toEqual([1, 1, 2, 1, 2, 3])
     })

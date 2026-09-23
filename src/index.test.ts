@@ -669,6 +669,43 @@ describe('Ginger Library - Comprehensive Tests', () => {
         expect(seen.sort()).toEqual([...names].sort())
       })
 
+      it('keeps the caller where clause in force under a hand-built multi-column cursor', async () => {
+        // Regression for the cursor-precedence fix. The cursor is caller-held
+        // base64 JSON and its `orderBy` replaces the request's, so a client can
+        // hand back any two-column cursor over allowlisted columns. Its OR-chain
+        // is then ANDed with the caller's `where` in `buildSelect`; left
+        // unparenthesised, the branch after the OR carried no `where` at all.
+        // `pagination.test.ts` checks the brackets on the fragment — this checks
+        // the rows that come back from a real database.
+        const cursor = encodeCursor({
+          orderBy: [
+            { column: 'tenant_id', direction: 'asc' },
+            { column: 'id', direction: 'asc' },
+          ],
+          values: ['tenant-2', 0],
+          direction: 'next',
+        })
+
+        const scoped = await testService.list({
+          auth: {},
+          where: { tenant_id: 'tenant-1' },
+          cursor,
+          limit: 10,
+        })
+        expect(
+          scoped.result.filter(
+            (r: { tenant_id: string }) => r.tenant_id !== 'tenant-1',
+          ),
+        ).toEqual([])
+
+        // Not vacuous: without the where, the same cursor does reach the
+        // tenant-2 row, so the assertion above is the where clause at work.
+        const unscoped = await testService.list({ auth: {}, cursor, limit: 10 })
+        expect(
+          unscoped.result.map((r: { tenant_id: string }) => r.tenant_id),
+        ).toContain('tenant-2')
+      })
+
       it('should handle cursor conditions correctly', () => {
         const token = {
           orderBy: [{ column: 'id', direction: 'asc' as const }],

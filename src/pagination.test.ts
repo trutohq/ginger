@@ -283,6 +283,62 @@ describe('Pagination System', () => {
       )
       expect(result.values).toEqual([1, 1, 2, 1, 2, 3])
     })
+
+    it('pins a NULL earlier column with IS, and pages past it toward larger values', () => {
+      // `a = NULL` and `a > NULL` are never true: after a row whose `a` is
+      // NULL, paging ended early, before the rest of the NULLs and every row
+      // after them.
+      const cursor: CursorToken = {
+        orderBy: [
+          { column: 'a', direction: 'asc' },
+          { column: 'id', direction: 'asc' },
+        ],
+        values: [null, 5],
+        direction: 'next',
+      }
+
+      const result = buildCursorConditions(cursor)
+
+      expect(result.text).toBe('(("a" IS NOT NULL) OR ("a" IS ? AND "id" > ?))')
+      expect(result.values).toEqual([null, 5])
+    })
+
+    it('reaches the NULL rows of a descending nullable column', () => {
+      // SQLite sorts NULL last on DESC, and `a < ?` is never true for NULL,
+      // so those rows were never reached.
+      const cursor: CursorToken = {
+        orderBy: [
+          { column: 'a', direction: 'desc' },
+          { column: 'id', direction: 'desc' },
+        ],
+        values: [3, 7],
+        direction: 'next',
+      }
+
+      const result = buildCursorConditions(
+        cursor,
+        undefined,
+        undefined,
+        (column) => column === 'a',
+      )
+
+      expect(result.text).toBe(
+        '((("a" < ? OR "a" IS NULL)) OR ("a" IS ? AND "id" < ?))',
+      )
+      expect(result.values).toEqual([3, 3, 7])
+    })
+
+    it('matches nothing past the last row in its direction', () => {
+      // Nothing sorts below NULL. With no condition at all, the query would
+      // start over at the first page.
+      const cursor: CursorToken = {
+        orderBy: [{ column: 'a', direction: 'desc' }],
+        values: [null],
+        direction: 'next',
+      }
+
+      expect(buildCursorConditions(cursor).text).toBe('(1 = 0)')
+    })
   })
 
   describe('getDefaultOrderBy', () => {
@@ -411,6 +467,77 @@ describe('Pagination System', () => {
       expect(iterations).toBeLessThan(maxIterations)
       expect(seen).toEqual(expectedOrder)
       expect(new Set(seen).size).toBe(seen.length) // no repeats
+    })
+
+    it('pages through NULLs in the first sort column, both orders, forward and back', () => {
+      // `a` holds NULLs, which SQLite sorts first on ASC and last on DESC.
+      // With `a = ?` / `a > ?` / `a < ?` against NULL never true, paging lost
+      // the rows after the first NULL on ASC and every NULL row on DESC.
+      const bunDb = new BunDatabase(':memory:')
+      bunDb.exec('CREATE TABLE items (id INTEGER PRIMARY KEY, a INTEGER)')
+      const rows: Array<{ id: number; a: number | null }> = [
+        { id: 1, a: 2 },
+        { id: 2, a: null },
+        { id: 3, a: 1 },
+        { id: 4, a: null },
+        { id: 5, a: 2 },
+        { id: 6, a: null },
+        { id: 7, a: 3 },
+        { id: 8, a: 1 },
+      ]
+      const insert = bunDb.prepare('INSERT INTO items (id, a) VALUES (?, ?)')
+      for (const row of rows) insert.run(row.id, row.a)
+      const isNullable = (column: string) => column === 'a'
+      const sqlOrder = (orderBy: OrderBy[]) =>
+        orderBy
+          .map((o) => `${o.column} ${o.direction.toUpperCase()}`)
+          .join(', ')
+      const page = (cursor: CursorToken | undefined, orderBy: OrderBy[]) => {
+        const conditions = cursor
+          ? buildCursorConditions(cursor, undefined, undefined, isNullable)
+          : { text: '', values: [] as unknown[] }
+        const where = conditions.text ? `WHERE ${conditions.text}` : ''
+        return bunDb
+          .prepare(
+            `SELECT id, a FROM items ${where} ORDER BY ${sqlOrder(orderBy)} LIMIT 3`,
+          )
+          .all(...(conditions.values as never[])) as typeof rows
+      }
+
+      for (const direction of ['asc', 'desc'] as const) {
+        const orderBy: OrderBy[] = [
+          { column: 'a', direction },
+          { column: 'id', direction },
+        ]
+        const expected = (
+          bunDb
+            .prepare(`SELECT id FROM items ORDER BY ${sqlOrder(orderBy)}`)
+            .all() as Array<{ id: number }>
+        ).map((r) => r.id)
+
+        const forward: number[] = []
+        let cursor: CursorToken | undefined
+        for (let i = 0; i < rows.length; i++) {
+          const found = page(cursor, orderBy)
+          if (found.length === 0) break
+          forward.push(...found.map((r) => r.id))
+          cursor = createCursor(found[found.length - 1]!, orderBy, 'next')
+        }
+        expect(forward, direction).toEqual(expected)
+
+        // Back from the last row, as the service reads a previous page: the
+        // order reversed, with the cursor's own order and direction.
+        const backward: number[] = []
+        const last = rows.find((r) => r.id === expected[expected.length - 1])!
+        cursor = createCursor(last, orderBy, 'prev')
+        for (let i = 0; i < rows.length; i++) {
+          const found = page(cursor, reverseOrderBy(orderBy))
+          if (found.length === 0) break
+          backward.push(...found.map((r) => r.id))
+          cursor = createCursor(found[found.length - 1]!, orderBy, 'prev')
+        }
+        expect(backward, direction).toEqual(expected.slice(0, -1).reverse())
+      }
     })
   })
 

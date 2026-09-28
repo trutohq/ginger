@@ -508,6 +508,7 @@ export class Service<
             cursorToken,
             this.table,
             resolveColumn,
+            (column) => this.columnAcceptsNull(column),
           )
         } catch (error) {
           throw new ValidationError(
@@ -1111,6 +1112,28 @@ export class Service<
       ctx.error = error as Error
       await this.runHooks('error', 'count', ctx)
       throw error
+    }
+  }
+
+  /**
+   * Whether the row schema lets `column` hold NULL, which decides whether the
+   * cursor conditions on it are NULL-aware (see `buildCursorConditions`). A
+   * column the shape doesn't describe, such as a joined one that a LEFT JOIN
+   * can leave NULL, counts as nullable.
+   */
+  private columnAcceptsNull(column: string): boolean {
+    const { shape } = this.rowSchema as unknown as {
+      shape?: Record<
+        string,
+        { safeParse?: (value: unknown) => { success: boolean } } | undefined
+      >
+    }
+    const field = shape?.[column]
+    if (typeof field?.safeParse !== 'function') return true
+    try {
+      return field.safeParse(null).success === true
+    } catch {
+      return true
     }
   }
 

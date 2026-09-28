@@ -669,6 +669,60 @@ describe('Ginger Library - Comprehensive Tests', () => {
         expect(seen.sort()).toEqual([...names].sort())
       })
 
+      it('pages through a column the row schema lets hold NULL, both orders', async () => {
+        // `updated_at` is nullable in `UserRowSchema`. Ordered by it, a page
+        // ending on a NULL stopped the listing (`updated_at = NULL` matches
+        // nothing), and on DESC the NULL rows, which SQLite sorts last, were
+        // never reached.
+        const insert = bunDb.prepare(
+          `INSERT INTO users (name, email, tenant_id, created_at, updated_at)
+           VALUES (?, ?, 'tenant-null', '2024-01-01T00:00:00Z', ?)`,
+        )
+        const updatedAt = [
+          '2024-02-02',
+          null,
+          '2024-02-01',
+          null,
+          '2024-02-03',
+          null,
+          '2024-02-01',
+        ]
+        for (const [i, value] of updatedAt.entries()) {
+          insert.run(`User ${i}`, `null-${i}@test.com`, value)
+        }
+
+        for (const direction of ['asc', 'desc'] as const) {
+          const expected = (
+            bunDb
+              .prepare(
+                `SELECT id FROM users WHERE tenant_id = 'tenant-null'
+                 ORDER BY updated_at ${direction.toUpperCase()}, id ${direction.toUpperCase()}`,
+              )
+              .all() as Array<{ id: number }>
+          ).map((r) => r.id)
+
+          const seen: number[] = []
+          let cursor: string | undefined
+          for (let page = 0; page < 10; page++) {
+            const res = await testService.list({
+              auth: {},
+              where: { tenant_id: 'tenant-null' },
+              orderBy: [
+                { column: 'updated_at', direction },
+                { column: 'id', direction },
+              ],
+              limit: 2,
+              ...(cursor ? { cursor } : {}),
+            })
+            seen.push(...res.result.map((r: { id: number }) => r.id))
+            if (!res.nextCursor) break
+            cursor = res.nextCursor
+          }
+
+          expect(seen, direction).toEqual(expected)
+        }
+      })
+
       it('keeps the caller where clause in force under a hand-built multi-column cursor', async () => {
         // Regression for the cursor-precedence fix. The cursor is caller-held
         // base64 JSON and its `orderBy` replaces the request's, so a client can

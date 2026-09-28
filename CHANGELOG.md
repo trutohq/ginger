@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.1.2]
 
+### Fixed
+
+- **Cursor pagination around NULL values:** SQLite sorts NULL below every value, first on ASC and last on DESC, and `= NULL`, `> NULL` and `< NULL` are never true. With two or more order-by columns, a page ending on a row whose earlier sort column was NULL stopped the listing, because the `col = ?` equality prefix and `col > ?` both matched nothing, and on DESC the NULL rows were never reached. For a column the row schema lets hold NULL, and for any NULL cursor value, the conditions are now NULL-aware (`col IS ?`, `col IS NOT NULL`, `(col < ? OR col IS NULL)`). A column that can't hold NULL keeps byte-identical SQL, and cursor tokens are unchanged.
+
 ### Security
 
 - **Cursor conditions escaped the caller's `where`:** `buildCursorConditions` OR-joined its conditions and returned them bare, and `buildSelect` ANDs that fragment with the caller's `where`. SQL binds `AND` tighter than `OR`, so with two or more order-by columns every branch after the first `OR` was evaluated without the caller's filter, and a filtered, paginated list could return rows the filter excludes. The OR-chain is now parenthesised. Single-column ordering emits byte-identical SQL, and cursor tokens are unchanged, so cursors already in flight keep working.

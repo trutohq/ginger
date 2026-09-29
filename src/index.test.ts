@@ -723,10 +723,12 @@ describe('Ginger Library - Comprehensive Tests', () => {
         }
       })
 
-      it('ends paging on a field the row schema reads from NULL as a value', async () => {
-        // The field accepts NULL but reads it as ''. Counted as nullable, its
-        // DESC condition became `(col < '' OR col IS NULL)`, which the stored
-        // NULL rows met on every page: the listing never ended.
+      it('pages exactly on a field the row schema reads from NULL as a value', async () => {
+        // The field accepts NULL but reads it as ''. With the cursor built
+        // from the parsed row, its DESC condition `(col < '' OR col IS NULL)`
+        // met the stored NULL rows on every page and the listing never ended;
+        // counted as not nullable instead, the NULL rows after a non-NULL
+        // boundary were skipped. The cursor now holds the stored value.
         const blankService = createService({
           table: 'users',
           db,
@@ -746,11 +748,18 @@ describe('Ginger Library - Comprehensive Tests', () => {
         for (const [i, value] of ['2024-02-01', null, null, null].entries()) {
           insert.run(`Blank ${i}`, `blank-${i}@test.com`, value)
         }
+        const expected = (
+          bunDb
+            .prepare(
+              `SELECT id FROM users WHERE tenant_id = 'tenant-blank'
+               ORDER BY updated_at DESC, id DESC`,
+            )
+            .all() as Array<{ id: number }>
+        ).map((r) => r.id)
 
         const seen: number[] = []
         let cursor: string | undefined
-        let pages = 0
-        for (; pages < 20; pages++) {
+        for (let page = 0; page < 20; page++) {
           const res = await blankService.list({
             auth: {},
             where: { tenant_id: 'tenant-blank' },
@@ -766,8 +775,7 @@ describe('Ginger Library - Comprehensive Tests', () => {
           cursor = res.nextCursor
         }
 
-        expect(pages).toBeLessThan(20)
-        expect(new Set(seen).size).toBe(seen.length)
+        expect(seen).toEqual(expected)
       })
 
       it('keeps the caller where clause in force under a hand-built multi-column cursor', async () => {

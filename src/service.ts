@@ -606,36 +606,51 @@ export class Service<
         }
       })
 
-      // Generate cursors
+      // Generate cursors. A cursor holds the order-by values as the database
+      // returned them, since the next page compares them with the stored
+      // values: a column the row schema transforms reads back in another
+      // form (a `z.coerce.date()` over `YYYY-MM-DD HH:MM:SS` text serialises
+      // as ISO text, and `T` sorts after the space). The parsed row is the
+      // fallback for a value the query returned under no flat key, or in a
+      // form a cursor can't carry (a driver's bigint, say).
+      const cursorRowAt = (index: number): Record<string, unknown> => {
+        const parsed = validatedRows[index]! as Record<string, unknown>
+        const stored = rows[index]!
+        const cursorRow = { ...parsed }
+        for (const order of orderBy) {
+          const flatKey = cursorFlatKey(order.column)
+          const value = stored[flatKey]
+          if (
+            flatKey in stored &&
+            (value === null ||
+              ['string', 'number', 'boolean'].includes(typeof value))
+          ) {
+            cursorRow[order.column] = value
+          } else if (flatKey !== order.column && flatKey in parsed) {
+            cursorRow[order.column] = parsed[flatKey]
+          }
+        }
+        return cursorRow
+      }
+
       let nextCursor: string | undefined
       let prevCursor: string | undefined
 
       if (validatedRows.length > 0) {
         if (hasNextPage) {
-          const lastRow = validatedRows[validatedRows.length - 1]! as Record<
-            string,
-            unknown
-          >
-          const cursorRow = { ...lastRow }
-          for (const order of orderBy) {
-            const flatKey = cursorFlatKey(order.column)
-            if (flatKey !== order.column && flatKey in lastRow) {
-              cursorRow[order.column] = lastRow[flatKey]
-            }
-          }
-          nextCursor = encodeCursor(createCursor(cursorRow, orderBy, 'next'))
+          nextCursor = encodeCursor(
+            createCursor(
+              cursorRowAt(validatedRows.length - 1),
+              orderBy,
+              'next',
+            ),
+          )
         }
 
         if (cursor) {
-          const firstRow = validatedRows[0]! as Record<string, unknown>
-          const cursorRow = { ...firstRow }
-          for (const order of orderBy) {
-            const flatKey = cursorFlatKey(order.column)
-            if (flatKey !== order.column && flatKey in firstRow) {
-              cursorRow[order.column] = firstRow[flatKey]
-            }
-          }
-          prevCursor = encodeCursor(createCursor(cursorRow, orderBy, 'prev'))
+          prevCursor = encodeCursor(
+            createCursor(cursorRowAt(0), orderBy, 'prev'),
+          )
         }
       }
 

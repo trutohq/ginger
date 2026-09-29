@@ -807,6 +807,108 @@ describe('Ginger Library - Comprehensive Tests', () => {
         ).toContain('tenant-2')
       })
 
+      it('pages on a column the row schema parses into a Date, both orders', async () => {
+        // Stored as SQLite writes CURRENT_TIMESTAMP (`YYYY-MM-DD HH:MM:SS`),
+        // read by the row schema as a Date. The cursor carried the parsed
+        // value, which serialises as ISO text (`…T…Z`), and the next page
+        // compared that with the stored text. `T` sorts after a space, so DESC
+        // served the last row of a page again and ASC skipped the rest of its
+        // day.
+        const datedService = createService({
+          table: 'users',
+          db,
+          rowSchema: UserRowSchema.extend({ created_at: z.coerce.date() }),
+          createSchema: UserCreateSchema,
+          updateSchema: UserUpdateSchema,
+        })
+        const insert = bunDb.prepare(
+          `INSERT INTO users (name, email, tenant_id, created_at)
+           VALUES (?, ?, 'tenant-dated', ?)`,
+        )
+        const createdAt = [
+          '2024-03-01 10:00:02',
+          '2024-03-01 10:00:00',
+          '2024-03-02 09:00:00',
+          '2024-03-01 10:00:01',
+          '2024-02-29 23:59:59',
+        ]
+        for (const [i, value] of createdAt.entries()) {
+          insert.run(`Dated ${i}`, `dated-${i}@test.com`, value)
+        }
+
+        for (const direction of ['asc', 'desc'] as const) {
+          const expected = (
+            bunDb
+              .prepare(
+                `SELECT id FROM users WHERE tenant_id = 'tenant-dated'
+                 ORDER BY created_at ${direction.toUpperCase()}`,
+              )
+              .all() as Array<{ id: number }>
+          ).map((r) => r.id)
+
+          const seen: number[] = []
+          let cursor: string | undefined
+          for (let page = 0; page < 10; page++) {
+            const res = await datedService.list({
+              auth: {},
+              where: { tenant_id: 'tenant-dated' },
+              orderBy: [{ column: 'created_at', direction }],
+              limit: 2,
+              ...(cursor ? { cursor } : {}),
+            })
+            seen.push(...res.result.map((r: { id: number }) => r.id))
+            if (!res.nextCursor) break
+            cursor = res.nextCursor
+          }
+
+          expect(seen, direction).toEqual(expected)
+        }
+
+        // The rows are still read through the schema.
+        const first = await datedService.list({
+          auth: {},
+          where: { tenant_id: 'tenant-dated' },
+          orderBy: [{ column: 'created_at', direction: 'desc' }],
+          limit: 1,
+        })
+        expect(first.result[0].created_at).toBeInstanceOf(Date)
+      })
+
+      it('falls back to the parsed value for a stored value a cursor cannot carry', async () => {
+        // bun:sqlite with `safeIntegers` returns INTEGER columns as bigint,
+        // which JSON can't hold; the row schema reads it as a number.
+        const bigDb = new BunDatabase(':memory:', { safeIntegers: true })
+        bigDb.exec(
+          `CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)`,
+        )
+        for (const name of ['a', 'b', 'c']) {
+          bigDb.prepare('INSERT INTO items (name) VALUES (?)').run(name)
+        }
+        const itemService = createService({
+          table: 'items',
+          db: fromBunSqlite(bigDb),
+          rowSchema: z.object({ id: z.coerce.number(), name: z.string() }),
+          createSchema: z.object({ name: z.string() }),
+          updateSchema: z.object({ name: z.string().optional() }),
+        })
+
+        const seen: number[] = []
+        let cursor: string | undefined
+        for (let page = 0; page < 10; page++) {
+          const res = await itemService.list({
+            auth: {},
+            limit: 1,
+            ...(cursor ? { cursor } : {}),
+          })
+          seen.push(...res.result.map((r: { id: number }) => r.id))
+          if (!res.nextCursor) break
+          cursor = res.nextCursor
+        }
+        bigDb.close()
+
+        expect(seen).toEqual([1, 2, 3])
+      })
+
       it('should handle cursor conditions correctly', () => {
         const token = {
           orderBy: [{ column: 'id', direction: 'asc' as const }],
@@ -2700,6 +2802,33 @@ describe('Ginger Library - Comprehensive Tests', () => {
       })
 
       expect(page.result.map((r) => r.id)).toEqual(['ia-2', 'ia-1', 'ia-3'])
+    })
+
+    it('pages by joined column $integration.name', async () => {
+      // The cursor reads the joined value from the row as the query returned
+      // it, under its flat key; from the nested parsed row it threw
+      // "not found in row for cursor creation" on any page with a next one.
+      const ids: string[] = []
+      let cursor: string | undefined
+      for (let page = 0; page < 5; page++) {
+        const res = await iaService.list({
+          auth: {},
+          orderBy: [
+            { column: '$integration.name', direction: 'asc' },
+            { column: 'id', direction: 'asc' },
+          ],
+          include: {
+            environment_integration: { integration: true },
+          },
+          limit: 1,
+          ...(cursor ? { cursor } : {}),
+        })
+        ids.push(...res.result.map((r) => r.id))
+        if (!res.nextCursor) break
+        cursor = res.nextCursor
+      }
+
+      expect(ids).toEqual(['ia-2', 'ia-1', 'ia-3'])
     })
 
     it('orders by exposed environment_id column', async () => {

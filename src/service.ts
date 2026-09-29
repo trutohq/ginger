@@ -619,8 +619,9 @@ export class Service<
       // join is included. A cursor is readable, and its own orderBy orders
       // the page it fetches, so a stored value of any other column (one a
       // shapeless row schema drops, a join resolved only for `expose`) would
-      // hand the caller what the response leaves out. Such a column still
-      // fails when the cursor is built, as it did before.
+      // hand the caller what the response leaves out. Without `select`, such
+      // a column still fails when the cursor is built, as it did before; a
+      // `select` projection returns stored values unparsed, and carries it.
       const carriedInRow = (
         column: string,
         parsed: Record<string, unknown>,

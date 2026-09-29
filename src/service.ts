@@ -1119,19 +1119,29 @@ export class Service<
    * Whether the row schema lets `column` hold NULL, which decides whether the
    * cursor conditions on it are NULL-aware (see `buildCursorConditions`). A
    * column the shape doesn't describe, such as a joined one that a LEFT JOIN
-   * can leave NULL, counts as nullable.
+   * can leave NULL, counts as nullable. A field that accepts NULL but reads it
+   * as another value (a `transform`, `catch` or `coerce`) doesn't: the cursor
+   * holds that value, and an `IS NULL` branch beside it matched the stored
+   * NULL rows on every page, so paging never ended.
    */
   private columnAcceptsNull(column: string): boolean {
     const { shape } = this.rowSchema as unknown as {
       shape?: Record<
         string,
-        { safeParse?: (value: unknown) => { success: boolean } } | undefined
+        | {
+            safeParse?: (value: unknown) => {
+              success: boolean
+              data?: unknown
+            }
+          }
+        | undefined
       >
     }
     const field = shape?.[column]
     if (typeof field?.safeParse !== 'function') return true
     try {
-      return field.safeParse(null).success === true
+      const parsed = field.safeParse(null)
+      return parsed.success === true && parsed.data === null
     } catch {
       return true
     }

@@ -723,6 +723,53 @@ describe('Ginger Library - Comprehensive Tests', () => {
         }
       })
 
+      it('ends paging on a field the row schema reads from NULL as a value', async () => {
+        // The field accepts NULL but reads it as ''. Counted as nullable, its
+        // DESC condition became `(col < '' OR col IS NULL)`, which the stored
+        // NULL rows met on every page: the listing never ended.
+        const blankService = createService({
+          table: 'users',
+          db,
+          rowSchema: UserRowSchema.extend({
+            updated_at: z
+              .string()
+              .nullable()
+              .transform((value) => value ?? ''),
+          }),
+          createSchema: UserCreateSchema,
+          updateSchema: UserUpdateSchema,
+        })
+        const insert = bunDb.prepare(
+          `INSERT INTO users (name, email, tenant_id, created_at, updated_at)
+           VALUES (?, ?, 'tenant-blank', '2024-01-01T00:00:00Z', ?)`,
+        )
+        for (const [i, value] of ['2024-02-01', null, null, null].entries()) {
+          insert.run(`Blank ${i}`, `blank-${i}@test.com`, value)
+        }
+
+        const seen: number[] = []
+        let cursor: string | undefined
+        let pages = 0
+        for (; pages < 20; pages++) {
+          const res = await blankService.list({
+            auth: {},
+            where: { tenant_id: 'tenant-blank' },
+            orderBy: [
+              { column: 'updated_at', direction: 'desc' },
+              { column: 'id', direction: 'desc' },
+            ],
+            limit: 1,
+            ...(cursor ? { cursor } : {}),
+          })
+          seen.push(...res.result.map((r: { id: number }) => r.id))
+          if (!res.nextCursor) break
+          cursor = res.nextCursor
+        }
+
+        expect(pages).toBeLessThan(20)
+        expect(new Set(seen).size).toBe(seen.length)
+      })
+
       it('keeps the caller where clause in force under a hand-built multi-column cursor', async () => {
         // Regression for the cursor-precedence fix. The cursor is caller-held
         // base64 JSON and its `orderBy` replaces the request's, so a client can

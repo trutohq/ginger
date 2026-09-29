@@ -22,6 +22,7 @@ import {
   legacyJoinColumnAlias,
   nestJoinedData,
   normalizeInclude,
+  parseQualifiedPath,
   resolveActiveJoins,
   resolveOrderByColumn,
   topLevelIncludeFlags,
@@ -606,36 +607,73 @@ export class Service<
         }
       })
 
-      // Generate cursors
+      // Generate cursors. A cursor holds the order-by values as the database
+      // returned them, since the next page compares them with the stored
+      // values: a column the row schema transforms reads back in another
+      // form (a `z.coerce.date()` over `YYYY-MM-DD HH:MM:SS` text serialises
+      // as ISO text, and `T` sorts after the space). The parsed row is the
+      // fallback for a value the query returned under no flat key, or in a
+      // form a cursor can't carry (a driver's bigint, say).
+      //
+      // Only for a column the response carries, a joined one only when its
+      // join is included. A cursor is readable, and its own orderBy orders
+      // the page it fetches, so a stored value of any other column (one a
+      // shapeless row schema drops, a join resolved only for `expose`) would
+      // hand the caller what the response leaves out. Without `select`, such
+      // a column still fails when the cursor is built, as it did before; a
+      // `select` projection returns stored values unparsed, and carries it.
+      const carriedInRow = (
+        column: string,
+        parsed: Record<string, unknown>,
+      ): boolean => {
+        if (!column.startsWith('$')) return column in parsed
+        const { joinPath } = parseQualifiedPath(column)
+        const join =
+          resolvedJoins.find((r) => r.path === joinPath) ??
+          resolvedJoins.find(
+            (r) => r.name === joinPath || r.sqlTable === joinPath,
+          )
+        return !!join && this.isJoinPathIncluded(join.path, include)
+      }
+      const cursorRowAt = (index: number): Record<string, unknown> => {
+        const parsed = validatedRows[index]! as Record<string, unknown>
+        const stored = rows[index]!
+        const cursorRow = { ...parsed }
+        for (const order of orderBy) {
+          const flatKey = cursorFlatKey(order.column)
+          const value = stored[flatKey]
+          if (
+            carriedInRow(order.column, parsed) &&
+            flatKey in stored &&
+            (value === null ||
+              ['string', 'number', 'boolean'].includes(typeof value))
+          ) {
+            cursorRow[order.column] = value
+          } else if (flatKey !== order.column && flatKey in parsed) {
+            cursorRow[order.column] = parsed[flatKey]
+          }
+        }
+        return cursorRow
+      }
+
       let nextCursor: string | undefined
       let prevCursor: string | undefined
 
       if (validatedRows.length > 0) {
         if (hasNextPage) {
-          const lastRow = validatedRows[validatedRows.length - 1]! as Record<
-            string,
-            unknown
-          >
-          const cursorRow = { ...lastRow }
-          for (const order of orderBy) {
-            const flatKey = cursorFlatKey(order.column)
-            if (flatKey !== order.column && flatKey in lastRow) {
-              cursorRow[order.column] = lastRow[flatKey]
-            }
-          }
-          nextCursor = encodeCursor(createCursor(cursorRow, orderBy, 'next'))
+          nextCursor = encodeCursor(
+            createCursor(
+              cursorRowAt(validatedRows.length - 1),
+              orderBy,
+              'next',
+            ),
+          )
         }
 
         if (cursor) {
-          const firstRow = validatedRows[0]! as Record<string, unknown>
-          const cursorRow = { ...firstRow }
-          for (const order of orderBy) {
-            const flatKey = cursorFlatKey(order.column)
-            if (flatKey !== order.column && flatKey in firstRow) {
-              cursorRow[order.column] = firstRow[flatKey]
-            }
-          }
-          prevCursor = encodeCursor(createCursor(cursorRow, orderBy, 'prev'))
+          prevCursor = encodeCursor(
+            createCursor(cursorRowAt(0), orderBy, 'prev'),
+          )
         }
       }
 
@@ -1119,29 +1157,22 @@ export class Service<
    * Whether the row schema lets `column` hold NULL, which decides whether the
    * cursor conditions on it are NULL-aware (see `buildCursorConditions`). A
    * column the shape doesn't describe, such as a joined one that a LEFT JOIN
-   * can leave NULL, counts as nullable. A field that accepts NULL but reads it
-   * as another value (a `transform`, `catch` or `coerce`) doesn't: the cursor
-   * holds that value, and an `IS NULL` branch beside it matched the stored
-   * NULL rows on every page, so paging never ended.
+   * can leave NULL, counts as nullable. So does a field that accepts NULL but
+   * reads it as another value (a `transform`, `catch` or `coerce`): the
+   * column can still hold NULL, and the cursor carries the stored value, NULL
+   * included, not what the field reads it as.
    */
   private columnAcceptsNull(column: string): boolean {
     const { shape } = this.rowSchema as unknown as {
       shape?: Record<
         string,
-        | {
-            safeParse?: (value: unknown) => {
-              success: boolean
-              data?: unknown
-            }
-          }
-        | undefined
+        { safeParse?: (value: unknown) => { success: boolean } } | undefined
       >
     }
     const field = shape?.[column]
     if (typeof field?.safeParse !== 'function') return true
     try {
-      const parsed = field.safeParse(null)
-      return parsed.success === true && parsed.data === null
+      return field.safeParse(null).success === true
     } catch {
       return true
     }

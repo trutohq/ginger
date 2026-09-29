@@ -22,6 +22,7 @@ import {
   legacyJoinColumnAlias,
   nestJoinedData,
   normalizeInclude,
+  parseQualifiedPath,
   resolveActiveJoins,
   resolveOrderByColumn,
   topLevelIncludeFlags,
@@ -613,6 +614,26 @@ export class Service<
       // as ISO text, and `T` sorts after the space). The parsed row is the
       // fallback for a value the query returned under no flat key, or in a
       // form a cursor can't carry (a driver's bigint, say).
+      //
+      // Only for a column the response carries, a joined one only when its
+      // join is included. A cursor is readable, and its own orderBy orders
+      // the page it fetches, so a stored value of any other column (one a
+      // shapeless row schema drops, a join resolved only for `expose`) would
+      // hand the caller what the response leaves out. Such a column still
+      // fails when the cursor is built, as it did before.
+      const carriedInRow = (
+        column: string,
+        parsed: Record<string, unknown>,
+      ): boolean => {
+        if (!column.startsWith('$')) return column in parsed
+        const { joinPath } = parseQualifiedPath(column)
+        const join =
+          resolvedJoins.find((r) => r.path === joinPath) ??
+          resolvedJoins.find(
+            (r) => r.name === joinPath || r.sqlTable === joinPath,
+          )
+        return !!join && this.isJoinPathIncluded(join.path, include)
+      }
       const cursorRowAt = (index: number): Record<string, unknown> => {
         const parsed = validatedRows[index]! as Record<string, unknown>
         const stored = rows[index]!
@@ -621,6 +642,7 @@ export class Service<
           const flatKey = cursorFlatKey(order.column)
           const value = stored[flatKey]
           if (
+            carriedInRow(order.column, parsed) &&
             flatKey in stored &&
             (value === null ||
               ['string', 'number', 'boolean'].includes(typeof value))

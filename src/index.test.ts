@@ -917,6 +917,86 @@ describe('Ginger Library - Comprehensive Tests', () => {
         expect(seen).toEqual([1, 2, 3])
       })
 
+      it('builds no cursor over a column the response leaves out', async () => {
+        // A cursor is readable, and its own orderBy orders the next page, so
+        // one over a column the response drops would read that column out.
+        const secretDb = new BunDatabase(':memory:')
+        secretDb.exec(
+          `CREATE TABLE accounts (id INTEGER PRIMARY KEY, name TEXT NOT NULL, password_hash TEXT NOT NULL);
+           INSERT INTO accounts (name, password_hash) VALUES ('a', 'hash-a'), ('b', 'hash-b');`,
+        )
+        const accountService = createService({
+          table: 'accounts',
+          db: fromBunSqlite(secretDb),
+          // A whole-object transform: no shape, and no `password_hash` out.
+          rowSchema: z
+            .object({
+              id: z.number(),
+              name: z.string(),
+              password_hash: z.string(),
+            })
+            .transform(({ password_hash: _hash, ...rest }) => rest),
+          createSchema: z.object({ name: z.string() }),
+          updateSchema: z.object({ name: z.string().optional() }),
+        })
+
+        await expect(
+          accountService.list({
+            auth: {},
+            orderBy: [{ column: 'password_hash', direction: 'asc' }],
+            limit: 1,
+          }),
+        ).rejects.toThrow('not found in row for cursor creation')
+        secretDb.close()
+      })
+
+      it('builds no cursor over a column of a join the response leaves out', async () => {
+        const noteDb = new BunDatabase(':memory:')
+        noteDb.exec(
+          `CREATE TABLE accounts (id TEXT PRIMARY KEY, team_id TEXT NOT NULL);
+           CREATE TABLE teams (id TEXT PRIMARY KEY, region TEXT NOT NULL, note TEXT);
+           INSERT INTO teams VALUES ('t-1', 'eu', 'note-1'), ('t-2', 'us', 'note-2');
+           INSERT INTO accounts VALUES ('a-1', 't-1'), ('a-2', 't-2');`,
+        )
+        const accountService = createService({
+          table: 'accounts',
+          db: fromBunSqlite(noteDb),
+          rowSchema: z.object({ id: z.string(), team_id: z.string() }),
+          createSchema: z.object({ id: z.string() }),
+          updateSchema: z.object({ team_id: z.string().optional() }),
+          joins: {
+            team: {
+              kind: 'one' as const,
+              localColumn: 'team_id',
+              remote: {
+                table: 'teams',
+                pk: 'id',
+                select: ['id', 'region', 'note'],
+              },
+              schema: z.object({ id: z.string() }),
+            },
+          },
+          // The join is resolved for this alone; `note` is never returned.
+          expose: [{ from: '$team.region', as: 'region' }],
+        })
+        // A hand-made cursor that orders by the join's `note`.
+        const cursor = btoa(
+          JSON.stringify({
+            orderBy: [
+              { column: '$team.note', direction: 'asc' },
+              { column: 'id', direction: 'asc' },
+            ],
+            values: ['', ''],
+            direction: 'next',
+          }),
+        )
+
+        await expect(
+          accountService.list({ auth: {}, limit: 1, cursor }),
+        ).rejects.toThrow('not found in row for cursor creation')
+        noteDb.close()
+      })
+
       it('should handle cursor conditions correctly', () => {
         const token = {
           orderBy: [{ column: 'id', direction: 'asc' as const }],

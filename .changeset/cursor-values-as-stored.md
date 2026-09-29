@@ -16,13 +16,18 @@ column (`$alias.col`) threw "not found in row for cursor creation" on any
 page with a next one, since the parsed row nests the joined values.
 
 Cursor values now come from the row as the database returned it, under the
-column's flat key. The parsed row is used for a value the query returned
+column's flat key, for a column the response carries (a joined one when its
+join is included). The parsed row is used for a value the query returned
 under no flat key, or in a form a cursor can't carry (a driver's bigint). The
 rows a list returns are unchanged. A cursor over a column the schema doesn't
 transform is byte-identical; one over a transformed column holds the stored
 value. A cursor issued before this still decodes, and pages as it did until
 it runs out.
 
-Cursors are base64 JSON, neither encrypted nor signed, so they now show the
-stored value of a column a list is ordered by, even where the row schema
-transforms it for the response.
+Cursors are base64 JSON, neither encrypted nor signed, and a cursor's own
+`orderBy` orders the page it fetches. A cursor now holds the stored value of
+each column it orders by, which for a column the row schema transforms is not
+the value the response shows (the whole address where a transform masks an
+email, say). A column the response doesn't carry (one a shapeless row schema
+drops, one of a join resolved only for `expose`) goes into no cursor: ordering
+by it still fails when the cursor is built.

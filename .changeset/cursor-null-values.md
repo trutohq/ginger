@@ -11,12 +11,12 @@ listing: the `col = ?` equality prefix matched nothing, and `col > ?` against
 NULL matched nothing either. On DESC, the NULL rows, which come last, were
 never reached at all.
 
-For a column whose row-schema field reads NULL as NULL, and for any NULL
-cursor value, the cursor conditions are now NULL-aware: `col IS ?` for the
-equality prefix, `col IS NOT NULL` after a NULL toward larger values, and
-`(col < ? OR col IS NULL)` before a value. Any other column keeps
-byte-identical SQL, and cursor tokens are unchanged. A field that reads NULL
-as another value (a `.transform`, a `.catch`, a `z.coerce` without
-`.nullable()`) counts as not holding NULL, since its cursors carry that value,
-so its NULL rows are still skipped on a DESC page and when paging back, as
-before.
+For a column the row schema's shape doesn't describe (a joined or exposed
+column, or any column of a schema without a shape), a field that reads NULL as
+NULL, and any NULL cursor value, the cursor conditions are now NULL-aware:
+`col IS ?` for the equality prefix, `col IS NOT NULL` after a NULL toward
+larger values, and `(col < ? OR col IS NULL)` before a value. A field that
+rejects NULL, or reads it as another value (a `.transform`, a `.catch`, a
+`z.coerce` without `.nullable()`), keeps byte-identical SQL: its cursors carry
+that value, not NULL, so its NULL rows past a page boundary are still skipped,
+in either direction, as before. Cursor tokens are unchanged.

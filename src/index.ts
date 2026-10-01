@@ -124,8 +124,9 @@ export type {
   SqlStorageCursor,
 } from './adapters/index.js'
 
-// Re-export zod v4 for convenience
-export * as z from 'zod/v4'
+// Re-export zod v4 for convenience. Through ./zod.js rather than straight from
+// 'zod/v4': see that file for the cold-start cost of the direct form.
+export * as z from './zod.js'
 
 /**
  * Create a new service instance with the provided configuration

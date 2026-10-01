@@ -1,0 +1,42 @@
+/**
+ * The `z` namespace ginger re-exports (`import { z } from '@truto/ginger'`).
+ *
+ * This is zod v4's classic API, minus the locale tables. It is a module of its
+ * own, rather than `export * as z from 'zod/v4'` in `index.ts`, for one reason:
+ * bundle size on a cold path.
+ *
+ * `zod/v4` exposes `locales` as a namespace (`export * as locales`), and so
+ * does `zod/v4/core`, and `zod/v4` also exports `z` — a namespace of itself.
+ * A namespace re-exported as a value has to carry every member, because a
+ * bundler cannot know which ones a consumer will touch — so `export * as z`
+ * pins all ~50 locale files (~200 KB of message tables nobody asked for) into
+ * every Worker that imports ginger, even one that only ever calls
+ * `z.object(...)`. They are evaluated on cold start, which is where a Worker
+ * pays for them (Cloudflare's startup CPU limit, error 10021).
+ *
+ * Shadowing the namespace-valued names with local exports stops `export *` from
+ * re-exporting them, so nothing reaches `locales/index.js`. English (the default
+ * message table, installed by `zod/v4` itself) is unaffected. Everything else
+ * is still a star re-export, so a zod upgrade that adds an export flows through
+ * without an edit here. `src/zod.test.ts` pins both halves: what is kept
+ * and what is shadowed.
+ */
+export * from 'zod/v4'
+
+// `z.core` stays (typed access such as `z.core.$ZodIssue` is in real use) but
+// goes through a shadowed copy, because `zod/v4/core` has its own `locales`.
+export * as core from './zod-core.js'
+
+/**
+ * @deprecated Not part of ginger's `z`: zod's locale tables are ~200 KB and
+ * re-exporting them keeps all of them on every consumer's cold-start path.
+ * Import the one you need directly — `import fr from 'zod/v4/locales/fr.js'`
+ * and `z.config(fr())`.
+ */
+export const locales: never = undefined as never
+
+/**
+ * @deprecated Not part of ginger's `z`: zod's `z.z` is a namespace of the
+ * whole of zod, locales included. Use `z` itself.
+ */
+export const z: never = undefined as never

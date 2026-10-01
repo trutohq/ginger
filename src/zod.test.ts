@@ -48,8 +48,9 @@ describe('z (re-exported zod v4)', () => {
   })
 
   // The reason zod.ts exists. A Worker that does `z.object(...)` must not pull
-  // zod's ~50 locale tables onto its cold-start path. Russian is the marker:
-  // its table is a long one, and nothing else in zod mentions this phrase.
+  // zod's ~50 locale tables onto its cold-start path. The markers are each
+  // table's own "invalid input" phrase, taken from the shipped locale files;
+  // ASCII ones survive a bundler that escapes non-ASCII (esbuild's default).
   it('does not drag zod locale tables into a bundle that uses z', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'ginger-z-'))
     try {
@@ -67,8 +68,9 @@ describe('z (re-exported zod v4)', () => {
       expect(out.success).toBe(true)
       const text = await out.outputs[0]!.text()
       expect(text).toContain('Invalid input') // English is still there
-      expect(text).not.toContain('Недопустимый ввод') // ru
+      expect(text).not.toContain('Ongeldige invoer') // nl
       expect(text).not.toContain('Entrée invalide') // fr
+      expect(text).not.toContain('Неверный ввод') // ru
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

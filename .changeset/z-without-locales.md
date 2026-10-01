@@ -1,5 +1,5 @@
 ---
-'@truto/ginger': minor
+'@truto/ginger': major
 ---
 
 Keep zod's locale tables out of every bundle that uses `z`.
@@ -17,11 +17,14 @@ schemas, `z.core`, `z.iso`, `z.coerce`, `z.toJSONSchema`, `z.config`, every type
 — is unchanged, and a zod upgrade that adds an export flows through untouched.
 English, zod's default message table, is unaffected.
 
-**Behaviour change:** `z.locales`, `z.z` and `z.core.locales` are now
-`undefined` (typed `never` and `@deprecated`, so using one is a compile error).
-To change the message language, import the table directly:
-`import fr from 'zod/v4/locales/fr.js'; z.config(fr())`. No package in the
-workspace used any of the three.
+**Breaking:** `z.locales`, `z.z` and `z.core.locales` are now `undefined`
+(typed `never` and `@deprecated`, so accessing a member of one — `z.locales.fr()`
+— is a compile error, though passing the value itself still type-checks), and
+`z.default` is gone (`'default' in z` is false). `z.core` keeps every binding but
+is no longer the same object as `zod/v4`'s `core`. To change the message
+language, import the table directly: `import fr from 'zod/v4/locales/fr.js';
+z.config(fr())`. No package in the workspace (elaichi, clove, envoy, saffron,
+truto) used any of these.
 
 Measured on a Worker bundle: ginger's contribution through zod drops from
 ~398 KB to ~190 KB of eagerly-evaluated source.

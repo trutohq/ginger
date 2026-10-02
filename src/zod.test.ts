@@ -75,4 +75,46 @@ describe('z (re-exported zod v4)', () => {
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  // The subpath is the other half of the same fix: a namespace import of
+  // `./zod.js` lets the bundler drop members the entry never touches, which the
+  // index's `export * as z` cannot. toJSONSchema is a large module nothing here
+  // calls, so its marker string being absent proves the shaking happened.
+  it('lets a bundle that uses `import * as z` from the subpath shake unused zod', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ginger-z-sub-'))
+    const bundle = async (importLine: string) => {
+      const entry = join(dir, `entry-${Math.random().toString(36).slice(2)}.ts`)
+      writeFileSync(
+        entry,
+        `${importLine}\nconsole.log(z.object({ a: z.string() }).parse({ a: 'x' }))\n`,
+      )
+      const out = await Bun.build({ entrypoints: [entry], target: 'browser' })
+      expect(out.success).toBe(true)
+      return (await out.outputs[0]!.text()).length
+    }
+    try {
+      const viaIndex = await bundle(
+        `import { z } from ${JSON.stringify(join(import.meta.dir, 'index.ts'))}`,
+      )
+      const viaSubpath = await bundle(
+        `import * as z from ${JSON.stringify(join(import.meta.dir, 'zod.ts'))}`,
+      )
+      expect(viaSubpath).toBeLessThan(viaIndex)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('publishes ./zod in package.json exports at files tsc emits', async () => {
+    const pkg = (await Bun.file(
+      join(import.meta.dir, '..', 'package.json'),
+    ).json()) as {
+      exports: Record<string, { import: string; types: string }>
+    }
+    // rootDir is src and outDir is dist, so src/zod.ts is dist/zod.js + .d.ts.
+    expect(pkg.exports['./zod']).toEqual({
+      import: './dist/zod.js',
+      types: './dist/zod.d.ts',
+    })
+  })
 })

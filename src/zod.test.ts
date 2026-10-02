@@ -78,42 +78,12 @@ describe('z (re-exported zod v4)', () => {
   })
 
   // The subpath is the other half of the same fix: a namespace import of
-  // `./zod.js` lets the bundler drop members the entry never touches, which the
-  // index's `export * as z` cannot (under Bun's shaker). `toJSONSchema` is a
-  // large module nothing here calls, so its name being absent from the subpath
-  // bundle (and present via the index) shows it was shaken, not just that the
-  // output happens to be smaller. This measures Bun.build's shaker; the esbuild
-  // test below covers what wrangler uses.
-  const bundleWithBun = async (dir: string, importLine: string) => {
-    const entry = join(dir, `entry-${Math.random().toString(36).slice(2)}.ts`)
-    writeFileSync(
-      entry,
-      `${importLine}\nconsole.log(z.object({ a: z.string() }).parse({ a: 'x' }))\n`,
-    )
-    const out = await Bun.build({ entrypoints: [entry], target: 'browser' })
-    expect(out.success).toBe(true)
-    return out.outputs[0]!.text()
-  }
-
-  it('lets a bundle that uses `import * as z` from the subpath shake unused zod (Bun)', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'ginger-z-sub-'))
-    try {
-      const viaIndex = await bundleWithBun(
-        dir,
-        `import { z } from ${JSON.stringify(join(import.meta.dir, 'index.ts'))}`,
-      )
-      const viaSubpath = await bundleWithBun(
-        dir,
-        `import * as z from ${JSON.stringify(join(import.meta.dir, 'zod.ts'))}`,
-      )
-      expect(viaIndex).toContain('toJSONSchema')
-      expect(viaSubpath).not.toContain('toJSONSchema')
-      expect(viaSubpath.length).toBeLessThan(viaIndex.length)
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
-  })
-
+  // `./zod.js` lets the bundler drop members the entry never touches, which a
+  // named `z` binding from the index's `export * as z` may not. Only esbuild is
+  // pinned here: Bun.build's shaker changes between releases (CI runs
+  // `bun-version: latest`, and a newer Bun already shakes the index import as
+  // well), so a Bun size comparison measures the Bun version, not this package.
+  //
   // esbuild is what wrangler bundles Workers with, so it is the shaker that
   // decides the real cold-start cost. Unlike Bun it also keeps zod's English
   // message table through the subpath (see the ENGLISH note in zod.ts), which

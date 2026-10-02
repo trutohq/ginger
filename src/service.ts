@@ -508,6 +508,7 @@ export class Service<
             cursorToken,
             this.table,
             resolveColumn,
+            (column) => this.columnAcceptsNull(column),
           )
         } catch (error) {
           throw new ValidationError(
@@ -1111,6 +1112,38 @@ export class Service<
       ctx.error = error as Error
       await this.runHooks('error', 'count', ctx)
       throw error
+    }
+  }
+
+  /**
+   * Whether the row schema lets `column` hold NULL, which decides whether the
+   * cursor conditions on it are NULL-aware (see `buildCursorConditions`). A
+   * column the shape doesn't describe, such as a joined one that a LEFT JOIN
+   * can leave NULL, counts as nullable. A field that accepts NULL but reads it
+   * as another value (a `transform`, `catch` or `coerce`) doesn't: the cursor
+   * holds that value, and an `IS NULL` branch beside it matched the stored
+   * NULL rows on every page, so paging never ended.
+   */
+  private columnAcceptsNull(column: string): boolean {
+    const { shape } = this.rowSchema as unknown as {
+      shape?: Record<
+        string,
+        | {
+            safeParse?: (value: unknown) => {
+              success: boolean
+              data?: unknown
+            }
+          }
+        | undefined
+      >
+    }
+    const field = shape?.[column]
+    if (typeof field?.safeParse !== 'function') return true
+    try {
+      const parsed = field.safeParse(null)
+      return parsed.success === true && parsed.data === null
+    } catch {
+      return true
     }
   }
 

@@ -132,11 +132,30 @@ export function createCursor(
 
 /**
  * Generate WHERE conditions for cursor-based pagination
+ *
+ * `isNullable` says whether a column can hold NULL. SQLite sorts NULL below
+ * every value (first on ASC, last on DESC), and `= NULL`, `> NULL` and
+ * `< NULL` are never true, so a plain keyset condition loses rows around
+ * NULLs: after a row whose earlier sort column is NULL, `col = ?` matches
+ * nothing and paging ends early, and on DESC the NULL rows, which come last,
+ * are never reached. For a column that can hold NULL, and for any cursor
+ * value that is NULL, the condition is NULL-aware instead:
+ *
+ * - equality on an earlier column is `col IS ?`, which matches NULL too;
+ * - "after" a NULL value is `col IS NOT NULL` where the walk goes toward
+ *   larger values, and nothing where it goes toward smaller ones (no value
+ *   sorts below NULL);
+ * - "before" a non-NULL value is `(col < ? OR col IS NULL)`.
+ *
+ * A column that can't hold NULL, with a non-NULL value, keeps the plain
+ * `=`, `>` and `<`, so its SQL is byte-identical to before and can still use
+ * an index range.
  */
 export function buildCursorConditions(
   cursor: CursorToken,
   tableName?: string,
   resolveColumn?: (column: string) => string,
+  isNullable: (column: string) => boolean = () => false,
 ): ReturnType<typeof sql> {
   const { orderBy, values, direction } = cursor
 
@@ -159,25 +178,44 @@ export function buildCursorConditions(
     return order.column
   }
 
-  for (let i = 0; i < orderBy.length; i++) {
-    const order = orderBy[i]!
-    const value = values[i]
+  const nullAware = (index: number): boolean =>
+    values[index] === null ||
+    values[index] === undefined ||
+    isNullable(orderBy[index]!.column)
 
+  // The comparison that puts a row strictly after the cursor on this column,
+  // or `undefined` when no row can be (after a NULL, toward smaller values).
+  // `toBindableValue()` coerces/validates the bound value and throws on
+  // non-scalar objects, so it can never be treated as a raw fragment.
+  const comparison = (index: number): ReturnType<typeof sql> | undefined => {
+    const order = orderBy[index]!
+    const value = values[index]
     const columnIdent = sql.ident(columnRef(order))
-
     // Determine if we need > or < based on cursor direction and sort direction
     const useGreaterThan =
       (direction === 'next') === (order.direction === 'asc')
+    if (value === null || value === undefined) {
+      return useGreaterThan ? sql`${columnIdent} IS NOT NULL` : undefined
+    }
+    if (useGreaterThan) {
+      return sql`${columnIdent} > ${toBindableValue(value)}`
+    }
+    return nullAware(index)
+      ? sql`(${columnIdent} < ${toBindableValue(value)} OR ${columnIdent} IS NULL)`
+      : sql`${columnIdent} < ${toBindableValue(value)}`
+  }
+
+  for (let i = 0; i < orderBy.length; i++) {
+    const compare = comparison(i)
+    if (!compare) {
+      // Nothing sorts past a NULL in this direction; later branches, which
+      // pin this column with IS, still page through the NULL rows.
+      continue
+    }
 
     if (orderBy.length === 1) {
       // Single-column order: simple comparison, no equality prefix possible.
-      // `toBindableValue()` coerces/validates the bound value and throws on
-      // non-scalar objects, so it can never be treated as a raw fragment.
-      conditions.push(
-        useGreaterThan
-          ? sql`${columnIdent} > ${toBindableValue(value)}`
-          : sql`${columnIdent} < ${toBindableValue(value)}`,
-      )
+      conditions.push(compare)
     } else {
       // Multi-column: build composite condition, one branch per order
       // column, each pinning every earlier column to its cursor value —
@@ -191,33 +229,28 @@ export function buildCursorConditions(
       // causing pages to overlap or skip rows.
       const equalityConditions: ReturnType<typeof sql>[] = []
 
-      for (let j = 0; j <= i; j++) {
-        const currentOrder = orderBy[j]!
-        const currentValue = values[j]
-
-        const currentColumnIdent = sql.ident(columnRef(currentOrder))
-
-        if (j === i) {
-          // Last condition in this group: use comparison
-          const currentUseGt =
-            (direction === 'next') === (currentOrder.direction === 'asc')
-          equalityConditions.push(
-            currentUseGt
-              ? sql`${currentColumnIdent} > ${toBindableValue(currentValue)}`
-              : sql`${currentColumnIdent} < ${toBindableValue(currentValue)}`,
-          )
-        } else {
-          // Earlier conditions: use equality
-          equalityConditions.push(
-            sql`${currentColumnIdent} = ${toBindableValue(currentValue)}`,
-          )
-        }
+      for (let j = 0; j < i; j++) {
+        const currentColumnIdent = sql.ident(columnRef(orderBy[j]!))
+        const currentValue = toBindableValue(values[j])
+        // Earlier conditions: use equality, NULL-safe where NULL can occur
+        equalityConditions.push(
+          nullAware(j)
+            ? sql`${currentColumnIdent} IS ${currentValue}`
+            : sql`${currentColumnIdent} = ${currentValue}`,
+        )
       }
+      // Last condition in this group: use comparison
+      equalityConditions.push(compare)
 
       const compositeCondition = sql.join(equalityConditions, ' AND ')
       conditions.push(sql`(${compositeCondition})`)
     }
   }
+
+  // Every branch was impossible: the cursor sits on the last possible row in
+  // this direction. Without a condition the query would start over at the
+  // first page.
+  if (conditions.length === 0) return sql`(1 = 0)`
 
   // Parenthesised, because the caller ANDs this with its own WHERE.
   //
@@ -234,7 +267,7 @@ export function buildCursorConditions(
   // It needs two or more order-by columns to be reachable, since a single
   // column produces one condition and no OR. Any table whose default ordering
   // is a composite primary key is therefore exposed by default.
-  if (conditions.length === 0) return sql``
+  //
   // One condition needs no parentheses and gets none, so the emitted SQL for
   // single-column ordering — the common case — is unchanged.
   if (conditions.length === 1) return conditions[0]!

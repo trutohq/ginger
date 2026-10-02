@@ -669,6 +669,144 @@ describe('Ginger Library - Comprehensive Tests', () => {
         expect(seen.sort()).toEqual([...names].sort())
       })
 
+      it('pages through a column the row schema lets hold NULL, both orders', async () => {
+        // `updated_at` is nullable in `UserRowSchema`. Ordered by it, a page
+        // ending on a NULL stopped the listing (`updated_at = NULL` matches
+        // nothing), and on DESC the NULL rows, which SQLite sorts last, were
+        // never reached.
+        const insert = bunDb.prepare(
+          `INSERT INTO users (name, email, tenant_id, created_at, updated_at)
+           VALUES (?, ?, 'tenant-null', '2024-01-01T00:00:00Z', ?)`,
+        )
+        const updatedAt = [
+          '2024-02-02',
+          null,
+          '2024-02-01',
+          null,
+          '2024-02-03',
+          null,
+          '2024-02-01',
+        ]
+        for (const [i, value] of updatedAt.entries()) {
+          insert.run(`User ${i}`, `null-${i}@test.com`, value)
+        }
+
+        for (const direction of ['asc', 'desc'] as const) {
+          const expected = (
+            bunDb
+              .prepare(
+                `SELECT id FROM users WHERE tenant_id = 'tenant-null'
+                 ORDER BY updated_at ${direction.toUpperCase()}, id ${direction.toUpperCase()}`,
+              )
+              .all() as Array<{ id: number }>
+          ).map((r) => r.id)
+
+          const seen: number[] = []
+          let cursor: string | undefined
+          for (let page = 0; page < 10; page++) {
+            const res = await testService.list({
+              auth: {},
+              where: { tenant_id: 'tenant-null' },
+              orderBy: [
+                { column: 'updated_at', direction },
+                { column: 'id', direction },
+              ],
+              limit: 2,
+              ...(cursor ? { cursor } : {}),
+            })
+            seen.push(...res.result.map((r: { id: number }) => r.id))
+            if (!res.nextCursor) break
+            cursor = res.nextCursor
+          }
+
+          expect(seen, direction).toEqual(expected)
+        }
+      })
+
+      it('ends paging on a field the row schema reads from NULL as a value', async () => {
+        // The field accepts NULL but reads it as ''. Counted as nullable, its
+        // DESC condition became `(col < '' OR col IS NULL)`, which the stored
+        // NULL rows met on every page: the listing never ended.
+        const blankService = createService({
+          table: 'users',
+          db,
+          rowSchema: UserRowSchema.extend({
+            updated_at: z
+              .string()
+              .nullable()
+              .transform((value) => value ?? ''),
+          }),
+          createSchema: UserCreateSchema,
+          updateSchema: UserUpdateSchema,
+        })
+        const insert = bunDb.prepare(
+          `INSERT INTO users (name, email, tenant_id, created_at, updated_at)
+           VALUES (?, ?, 'tenant-blank', '2024-01-01T00:00:00Z', ?)`,
+        )
+        for (const [i, value] of ['2024-02-01', null, null, null].entries()) {
+          insert.run(`Blank ${i}`, `blank-${i}@test.com`, value)
+        }
+
+        const seen: number[] = []
+        let cursor: string | undefined
+        let pages = 0
+        for (; pages < 20; pages++) {
+          const res = await blankService.list({
+            auth: {},
+            where: { tenant_id: 'tenant-blank' },
+            orderBy: [
+              { column: 'updated_at', direction: 'desc' },
+              { column: 'id', direction: 'desc' },
+            ],
+            limit: 1,
+            ...(cursor ? { cursor } : {}),
+          })
+          seen.push(...res.result.map((r: { id: number }) => r.id))
+          if (!res.nextCursor) break
+          cursor = res.nextCursor
+        }
+
+        expect(pages).toBeLessThan(20)
+        expect(new Set(seen).size).toBe(seen.length)
+      })
+
+      it('keeps the caller where clause in force under a hand-built multi-column cursor', async () => {
+        // Regression for the cursor-precedence fix. The cursor is caller-held
+        // base64 JSON and its `orderBy` replaces the request's, so a client can
+        // hand back any two-column cursor over allowlisted columns. Its OR-chain
+        // is then ANDed with the caller's `where` in `buildSelect`; left
+        // unparenthesised, the branch after the OR carried no `where` at all.
+        // `pagination.test.ts` checks the brackets on the fragment — this checks
+        // the rows that come back from a real database.
+        const cursor = encodeCursor({
+          orderBy: [
+            { column: 'tenant_id', direction: 'asc' },
+            { column: 'id', direction: 'asc' },
+          ],
+          values: ['tenant-2', 0],
+          direction: 'next',
+        })
+
+        const scoped = await testService.list({
+          auth: {},
+          where: { tenant_id: 'tenant-1' },
+          cursor,
+          limit: 10,
+        })
+        expect(
+          scoped.result.filter(
+            (r: { tenant_id: string }) => r.tenant_id !== 'tenant-1',
+          ),
+        ).toEqual([])
+
+        // Not vacuous: without the where, the same cursor does reach the
+        // tenant-2 row, so the assertion above is the where clause at work.
+        const unscoped = await testService.list({ auth: {}, cursor, limit: 10 })
+        expect(
+          unscoped.result.map((r: { tenant_id: string }) => r.tenant_id),
+        ).toContain('tenant-2')
+      })
+
       it('should handle cursor conditions correctly', () => {
         const token = {
           orderBy: [{ column: 'id', direction: 'asc' as const }],

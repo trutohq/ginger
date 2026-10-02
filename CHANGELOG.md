@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.2]
+
+### Fixed
+
+- **Cursor pagination around NULL values:** SQLite sorts NULL below every value, first on ASC and last on DESC, and `= NULL`, `> NULL` and `< NULL` are never true. With two or more order-by columns, a page ending on a row whose earlier sort column was NULL stopped the listing, because the `col = ?` equality prefix and `col > ?` both matched nothing, and on DESC the NULL rows were never reached. For a column the row schema's shape doesn't describe (a joined or exposed column, or any column of a schema without a shape), a field that reads NULL as NULL, and any NULL cursor value, the conditions are now NULL-aware (`col IS ?`, `col IS NOT NULL`, `(col < ? OR col IS NULL)`). A field that rejects NULL, or reads it as another value (a `.transform`, a `.catch`, a `z.coerce` without `.nullable()`), keeps byte-identical SQL: its cursors carry that value, not NULL, so its NULL rows past a page boundary are still skipped, in either direction, as before. Cursor tokens are unchanged.
+
+### Security
+
+- **Cursor conditions escaped the caller's `where`:** `buildCursorConditions` OR-joined its conditions and returned them bare, and `buildSelect` ANDs that fragment with the caller's `where`. SQL binds `AND` tighter than `OR`, so with two or more order-by columns every branch after the first `OR` was evaluated without the caller's filter, and a filtered, paginated list could return rows the filter excludes. The OR-chain is now parenthesised. Single-column ordering emits byte-identical SQL, and cursor tokens are unchanged, so cursors already in flight keep working.
+
 ## [2.1.1]
 
 ### Fixed

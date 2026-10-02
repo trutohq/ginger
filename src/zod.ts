@@ -1,5 +1,6 @@
 /**
- * The `z` namespace ginger re-exports (`import { z } from '@truto/ginger'`).
+ * The `z` namespace ginger re-exports (`import { z } from '@truto/ginger'`),
+ * also published as the `@truto/ginger/zod` subpath.
  *
  * This is zod v4's classic API, minus the locale tables. It is a module of its
  * own, rather than `export * as z from 'zod/v4'` in `index.ts`, for one reason:
@@ -15,11 +16,32 @@
  * pays for them (Cloudflare's startup CPU limit, error 10021).
  *
  * Shadowing the namespace-valued names with local exports stops `export *` from
- * re-exporting them, so nothing reaches `locales/index.js`. English (the default
- * message table, installed by `zod/v4` itself) is unaffected. Everything else
+ * re-exporting them, so nothing reaches `locales/index.js`. Everything else
  * is still a star re-export, so a zod upgrade that adds an export flows through
  * without an edit here. `src/zod.test.ts` pins both halves: what is kept
  * and what is shadowed.
+ *
+ * ENGLISH. zod installs its English messages with a top-level `config(en())`
+ * in `classic/external.js`, and zod declares `"sideEffects": false`, so a
+ * bundler is allowed to drop that call. Whether it does is the bundler's call,
+ * not ours: esbuild (what wrangler uses) keeps it through both spellings here;
+ * Bun.build keeps it through the index's `z` but drops it for the `./zod`
+ * subpath (and for a raw `import * as z from 'zod/v4'` — upstream behaviour);
+ * Vite/Rollup drop it for both. A dropped call degrades every message to
+ * "Invalid input"; validation itself is unaffected. A consumer whose bundler
+ * does this and who wants the full text installs it itself — `locales` is
+ * shadowed here, so import the table from zod directly:
+ * `import en from 'zod/v4/locales/en.js'` and `z.config(en())`.
+ *
+ * THE SUBPATH. Shadowing removes the locales, but `import { z } from
+ * '@truto/ginger'` still hands the bundler a namespace *value* (`export * as z`
+ * in the index), and a namespace used as a binding has to be materialized
+ * whole: every schema class, `toJSONSchema` and the rest stay even when the
+ * consumer only calls `z.object`. `import * as z from '@truto/ginger/zod'`
+ * names this module directly instead, so the bundler sees `z.object` as a plain
+ * member access and drops whatever is never touched. Same zod copy either way,
+ * so `z.infer<>` and `instanceof` agree across both spellings. The index's
+ * `z` stays for consumers that do not bundle for a cold path.
  */
 export * from 'zod/v4'
 

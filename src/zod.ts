@@ -16,11 +16,22 @@
  * pays for them (Cloudflare's startup CPU limit, error 10021).
  *
  * Shadowing the namespace-valued names with local exports stops `export *` from
- * re-exporting them, so nothing reaches `locales/index.js`. English (the default
- * message table, installed by `zod/v4` itself) is unaffected. Everything else
+ * re-exporting them, so nothing reaches `locales/index.js`. Everything else
  * is still a star re-export, so a zod upgrade that adds an export flows through
  * without an edit here. `src/zod.test.ts` pins both halves: what is kept
  * and what is shadowed.
+ *
+ * ENGLISH. zod installs its English messages with a top-level `config(en())`
+ * in `classic/external.js`, and zod declares `"sideEffects": false`, so a
+ * bundler is allowed to drop that call. Whether it does is the bundler's call,
+ * not ours: esbuild (what wrangler uses) keeps it through both spellings here;
+ * Bun.build keeps it through the index's `z` but drops it for the `./zod`
+ * subpath (and for a raw `import * as z from 'zod/v4'` — upstream behaviour);
+ * Vite/Rollup drop it for both. A dropped call degrades every message to
+ * "Invalid input"; validation itself is unaffected. A consumer whose bundler
+ * does this and who wants the full text installs it itself — `locales` is
+ * shadowed here, so import the table from zod directly:
+ * `import en from 'zod/v4/locales/en.js'` and `z.config(en())`.
  *
  * THE SUBPATH. Shadowing removes the locales, but `import { z } from
  * '@truto/ginger'` still hands the bundler a namespace *value* (`export * as z`

@@ -30,12 +30,12 @@
   "type": "module",
   "exports": {
     ".": {
-      "import": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
     },
     "./zod": {
-      "import": "./dist/zod.js",
-      "types": "./dist/zod.d.ts"
+      "types": "./dist/zod.d.ts",
+      "import": "./dist/zod.js"
     }
   },
   "main": "./dist/index.js",

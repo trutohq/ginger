@@ -279,6 +279,14 @@ const service = createService({
 })
 ```
 
+`z` is zod v4's classic API (without the locale tables). If you bundle for a
+cold path such as a Worker, prefer `import * as z from '@truto/ginger/zod'`: the
+same `z`, but the bundler can drop the zod members you never call, which it
+cannot do for the named `z` binding (it has to materialize the whole namespace).
+One caveat: some bundlers (Bun.build, Vite/Rollup) can drop zod's English
+message table through this spelling, leaving errors as "Invalid input"; see the
+note in `src/zod.ts` for the one-line fix.
+
 ### CRUD methods
 
 Every service gets these methods out of the box:

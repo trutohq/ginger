@@ -124,11 +124,16 @@ export type {
   SqlStorageCursor,
 } from './adapters/index.js'
 
-// Re-export zod v4 for convenience
-export * as z from 'zod/v4'
+// Re-export zod v4 for convenience. Through ./zod.js rather than straight from
+// 'zod/v4': see that file for the cold-start cost of the direct form.
+export * as z from './zod.js'
 
 /**
  * Create a new service instance with the provided configuration
+ *
+ * Bundling for a cold path (a Worker)? Prefer `import * as z from
+ * '@truto/ginger/zod'` over the named `z`: same zod, but the bundler can drop
+ * the members you never call. Caveat on English messages: see `src/zod.ts`.
  *
  * @example
  * ```typescript

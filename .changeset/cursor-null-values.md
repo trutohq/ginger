@@ -12,11 +12,15 @@ NULL matched nothing either. On DESC, the NULL rows, which come last, were
 never reached at all.
 
 For a column the row schema's shape doesn't describe (a joined or exposed
-column, or any column of a schema without a shape), a field that reads NULL as
-NULL, and any NULL cursor value, the cursor conditions are now NULL-aware:
+column, or any column of a schema without a shape that doesn't rewrite the
+row), a field that reads NULL as NULL, and any NULL cursor value, the cursor
+conditions are now NULL-aware:
 `col IS ?` for the equality prefix, `col IS NOT NULL` after a NULL toward
 larger values, and `(col < ? OR col IS NULL)` before a value. A field that
 rejects NULL, or reads it as another value (a `.transform`, a `.catch`, a
 `z.coerce` without `.nullable()`), keeps byte-identical SQL: its cursors carry
 that value, not NULL, so its NULL rows past a page boundary are still skipped,
-in either direction, as before. Cursor tokens are unchanged.
+in either direction, as before. So does every column of a row schema that
+reads the whole row as something else (`z.object(...).transform(...)`,
+`.catch`, `.default`), which may turn any column's NULL into a value. Cursor
+tokens are unchanged.

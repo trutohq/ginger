@@ -75,6 +75,19 @@ interface ParsedSelect {
 /**
  * Main service class that provides type-safe data access for SQLite databases
  */
+
+/**
+ * Zod schema types that read a row as something other than its columns: see
+ * `columnAcceptsNull`.
+ */
+const ROW_REWRITING_SCHEMA_TYPES = new Set([
+  'pipe',
+  'transform',
+  'catch',
+  'default',
+  'prefault',
+])
+
 export class Service<
   TRow extends z.ZodTypeAny,
   TCreate extends z.ZodTypeAny,
@@ -1123,9 +1136,14 @@ export class Service<
    * as another value (a `transform`, `catch` or `coerce`) doesn't: the cursor
    * holds that value, and an `IS NULL` branch beside it matched the stored
    * NULL rows on every page, so paging never ended.
+   *
+   * A row schema that reads the whole row as something else
+   * (`z.object(...).transform(...)`, `.catch`, `.default`) has no shape, and
+   * may turn any column's NULL into a value, so no column of it counts: its
+   * SQL stays as it was before NULL-aware cursors, which ends paging.
    */
   private columnAcceptsNull(column: string): boolean {
-    const { shape } = this.rowSchema as unknown as {
+    const { shape, _zod } = this.rowSchema as unknown as {
       shape?: Record<
         string,
         | {
@@ -1136,6 +1154,10 @@ export class Service<
           }
         | undefined
       >
+      _zod?: { def?: { type?: string } }
+    }
+    if (!shape && ROW_REWRITING_SCHEMA_TYPES.has(_zod?.def?.type ?? '')) {
+      return false
     }
     const field = shape?.[column]
     if (typeof field?.safeParse !== 'function') return true

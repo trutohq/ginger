@@ -73,21 +73,35 @@ interface ParsedSelect {
 }
 
 /**
- * Main service class that provides type-safe data access for SQLite databases
+ * Whether a row schema may read a stored column as a value other than the
+ * one stored (see `Service.columnAcceptsNull`). Anything but a plain
+ * `z.object` may: `.transform()`, `z.preprocess()` and `.pipe()` are pipes,
+ * `.catch()` and `.default()` read the row as something else, and wrapped
+ * again (`.nullable()`, `.readonly()`, `z.lazy()`) they hide it. A plain
+ * object may too, with an `.overwrite()` check. `.refine()` changes no value.
+ * A schema that isn't zod v4 is read by its shape alone, as before.
  */
+function rowSchemaMayRewrite(schema: unknown): boolean {
+  const def = (
+    schema as {
+      _zod?: {
+        def?: {
+          type?: string
+          checks?: Array<{ _zod?: { def?: { check?: string } } }>
+        }
+      }
+    }
+  )?._zod?.def
+  if (!def) return false
+  if (def.type !== 'object') return true
+  return (def.checks ?? []).some(
+    (check) => check?._zod?.def?.check === 'overwrite',
+  )
+}
 
 /**
- * Zod schema types that read a row as something other than its columns: see
- * `columnAcceptsNull`.
+ * Main service class that provides type-safe data access for SQLite databases
  */
-const ROW_REWRITING_SCHEMA_TYPES = new Set([
-  'pipe',
-  'transform',
-  'catch',
-  'default',
-  'prefault',
-])
-
 export class Service<
   TRow extends z.ZodTypeAny,
   TCreate extends z.ZodTypeAny,
@@ -1137,13 +1151,23 @@ export class Service<
    * holds that value, and an `IS NULL` branch beside it matched the stored
    * NULL rows on every page, so paging never ended.
    *
-   * A row schema that reads the whole row as something else
-   * (`z.object(...).transform(...)`, `.catch`, `.default`) has no shape, and
-   * may turn any column's NULL into a value, so no column of it counts: its
-   * SQL stays as it was before NULL-aware cursors, which ends paging.
+   * A row schema that may rewrite the row (see `rowSchemaMayRewrite`) may
+   * turn any of its columns' NULL into a value, so none of them counts: their
+   * SQL stays as it was before NULL-aware cursors, which ends paging. A joined
+   * or exposed column is added to the row after the row schema runs, so it
+   * still counts.
    */
   private columnAcceptsNull(column: string): boolean {
-    const { shape, _zod } = this.rowSchema as unknown as {
+    if (
+      column.startsWith('$') ||
+      this.expose?.some((exposed) => exposed.as === column)
+    ) {
+      return true
+    }
+    if (rowSchemaMayRewrite(this.rowSchema)) {
+      return false
+    }
+    const { shape } = this.rowSchema as unknown as {
       shape?: Record<
         string,
         | {
@@ -1154,10 +1178,6 @@ export class Service<
           }
         | undefined
       >
-      _zod?: { def?: { type?: string } }
-    }
-    if (!shape && ROW_REWRITING_SCHEMA_TYPES.has(_zod?.def?.type ?? '')) {
-      return false
     }
     const field = shape?.[column]
     if (typeof field?.safeParse !== 'function') return true

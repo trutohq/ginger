@@ -770,49 +770,90 @@ describe('Ginger Library - Comprehensive Tests', () => {
         expect(new Set(seen).size).toBe(seen.length)
       })
 
-      it('ends paging when the whole row schema reads NULL as a value', async () => {
-        // No shape to read the field from, so every column counted as
-        // nullable, and the transform turned the stored NULLs into '': the
-        // same endless DESC listing as a field-level transform.
+      const fillUpdatedAt = (row: z.infer<typeof UserRowSchema>) => ({
+        ...row,
+        updated_at: row.updated_at ?? '',
+      })
+
+      it.each([
+        ['.transform()', () => UserRowSchema.transform(fillUpdatedAt)],
+        [
+          '.transform().nullable()',
+          () => UserRowSchema.transform(fillUpdatedAt).nullable(),
+        ],
+        [
+          '.transform().readonly()',
+          () => UserRowSchema.transform(fillUpdatedAt).readonly(),
+        ],
+        [
+          'z.lazy()',
+          () => z.lazy(() => UserRowSchema.transform(fillUpdatedAt)),
+        ],
+        ['.overwrite()', () => UserRowSchema.overwrite(fillUpdatedAt)],
+      ])(
+        'ends paging when the row schema (%s) reads NULL as a value',
+        async (_label, rowSchema) => {
+          // Read off the whole row, not a field, the stored NULLs became '':
+          // the same endless DESC listing as a field-level transform.
+          const rowService = createService({
+            table: 'users',
+            db,
+            rowSchema: rowSchema() as unknown as typeof UserRowSchema,
+            createSchema: UserCreateSchema,
+            updateSchema: UserUpdateSchema,
+          })
+          const tenant = `tenant-row-${_label}`
+          const insert = bunDb.prepare(
+            `INSERT INTO users (name, email, tenant_id, created_at, updated_at)
+             VALUES (?, ?, ?, '2024-01-01T00:00:00Z', ?)`,
+          )
+          for (const [i, value] of ['2024-02-01', null, null, null].entries()) {
+            insert.run(`Row ${i}`, `row-${_label}-${i}@test.com`, tenant, value)
+          }
+
+          const seen: number[] = []
+          let cursor: string | undefined
+          let pages = 0
+          for (; pages < 20; pages++) {
+            const res = await rowService.list({
+              auth: {},
+              where: { tenant_id: tenant },
+              orderBy: [
+                { column: 'updated_at', direction: 'desc' },
+                { column: 'id', direction: 'desc' },
+              ],
+              limit: 1,
+              ...(cursor ? { cursor } : {}),
+            })
+            seen.push(...res.result.map((r: { id: number }) => r.id))
+            if (!res.nextCursor) break
+            cursor = res.nextCursor
+          }
+
+          expect(pages).toBeLessThan(20)
+          expect(new Set(seen).size).toBe(seen.length)
+        },
+      )
+
+      it('keeps joined and exposed columns NULL-aware under a row schema that rewrites the row', () => {
+        // Join data and exposed columns are added to the row after the row
+        // schema runs, so it can't turn their NULLs into values.
         const rowService = createService({
           table: 'users',
           db,
-          rowSchema: UserRowSchema.transform((row) => ({
-            ...row,
-            updated_at: row.updated_at ?? '',
-          })),
+          rowSchema: UserRowSchema.transform(
+            fillUpdatedAt,
+          ) as unknown as typeof UserRowSchema,
           createSchema: UserCreateSchema,
           updateSchema: UserUpdateSchema,
-        })
-        const insert = bunDb.prepare(
-          `INSERT INTO users (name, email, tenant_id, created_at, updated_at)
-           VALUES (?, ?, 'tenant-row', '2024-01-01T00:00:00Z', ?)`,
-        )
-        for (const [i, value] of ['2024-02-01', null, null, null].entries()) {
-          insert.run(`Row ${i}`, `row-${i}@test.com`, value)
+          expose: [{ from: '$profile.bio', as: 'bio' }],
+        } as never) as unknown as {
+          columnAcceptsNull(column: string): boolean
         }
 
-        const seen: number[] = []
-        let cursor: string | undefined
-        let pages = 0
-        for (; pages < 20; pages++) {
-          const res = await rowService.list({
-            auth: {},
-            where: { tenant_id: 'tenant-row' },
-            orderBy: [
-              { column: 'updated_at', direction: 'desc' },
-              { column: 'id', direction: 'desc' },
-            ],
-            limit: 1,
-            ...(cursor ? { cursor } : {}),
-          })
-          seen.push(...res.result.map((r: { id: number }) => r.id))
-          if (!res.nextCursor) break
-          cursor = res.nextCursor
-        }
-
-        expect(pages).toBeLessThan(20)
-        expect(new Set(seen).size).toBe(seen.length)
+        expect(rowService.columnAcceptsNull('updated_at')).toBe(false)
+        expect(rowService.columnAcceptsNull('$profile.bio')).toBe(true)
+        expect(rowService.columnAcceptsNull('bio')).toBe(true)
       })
 
       it('keeps the caller where clause in force under a hand-built multi-column cursor', async () => {

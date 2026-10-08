@@ -7,7 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [2.1.2]
+## [3.0.0]
+
+### Changed
+
+- **Breaking: `z` no longer carries zod's locale tables.** `export * as z from 'zod/v4'` re-exported a namespace as a value, so a bundler had to keep every member, including `locales`: all ~50 message tables (~200 KB of the ~400 KB zod costs in a bundle), evaluated on the cold start of any Worker that imports ginger. `z` now comes from `src/zod.ts`, which star-re-exports `zod/v4` and shadows the names that reach the locale tables. `z.locales`, `z.z` and `z.core.locales` are now `undefined` (typed `never` and `@deprecated`, so `z.locales.fr()` is a compile error), `z.default` is gone (`'default' in z` is false), and `z.core` keeps every binding but is no longer the same object as `zod/v4`'s `core`. Everything else (schemas, `z.core`, `z.iso`, `z.coerce`, `z.toJSONSchema`, `z.config`, every type) is unchanged, and English messages are unaffected. To change the message language, import the table directly: `import fr from 'zod/v4/locales/fr.js'; z.config(fr())`.
+
+### Added
+
+- **`@truto/ginger/zod` subpath:** `import * as z from '@truto/ginger/zod'` is the same `z` (same zod copy, same exports) as `import { z } from '@truto/ginger'`, but a bundler can drop the zod members a Worker never calls: about 94 KB instead of 200 KB on a bundle that only calls `z.object(...)`. zod installs its English messages with a top-level `config(en())` and is `"sideEffects": false`, so a bundler may drop that call: esbuild (wrangler) keeps it, Bun.build drops it for the subpath, Vite and Rollup drop it for both spellings. Without it messages read "Invalid input"; call `z.config(en())` once at startup (`import en from 'zod/v4/locales/en.js'`) to restore them.
 
 ### Fixed
 

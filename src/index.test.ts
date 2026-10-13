@@ -852,6 +852,45 @@ describe('Ginger Library - Comprehensive Tests', () => {
         updated_at: row.updated_at ?? '',
       })
 
+      // Pages a DESC listing of one NULL-dated row after another, as above.
+      const pageV3 = async (label: string, rowSchema: unknown) => {
+        const rowService = createService({
+          table: 'users',
+          db,
+          rowSchema: rowSchema as unknown as typeof UserRowSchema,
+          createSchema: UserCreateSchema,
+          updateSchema: UserUpdateSchema,
+        })
+        const tenant = `tenant-v3-${label}`
+        const insert = bunDb.prepare(
+          `INSERT INTO users (name, email, tenant_id, created_at, updated_at)
+           VALUES (?, ?, ?, '2024-01-01T00:00:00Z', ?)`,
+        )
+        for (const [i, value] of ['2024-02-01', null, null, null].entries()) {
+          insert.run(`V3 ${i}`, `v3-${label}-${i}@test.com`, tenant, value)
+        }
+
+        const seen: number[] = []
+        let cursor: string | undefined
+        let pages = 0
+        for (; pages < 20; pages++) {
+          const res = await rowService.list({
+            auth: {},
+            where: { tenant_id: tenant },
+            orderBy: [
+              { column: 'updated_at', direction: 'desc' },
+              { column: 'id', direction: 'desc' },
+            ],
+            limit: 1,
+            ...(cursor ? { cursor } : {}),
+          })
+          seen.push(...res.result.map((r: { id: number }) => r.id))
+          if (!res.nextCursor) break
+          cursor = res.nextCursor
+        }
+        return { pages, seen }
+      }
+
       it.each([
         ['.transform()', () => UserRowSchemaV3.transform(fillUpdatedAtV3)],
         [
@@ -870,58 +909,33 @@ describe('Ginger Library - Comprehensive Tests', () => {
               UserRowSchemaV3,
             ),
         ],
-        [
-          'a field that reads NULL as a value',
-          () =>
-            UserRowSchemaV3.extend({
-              updated_at: z3
-                .string()
-                .nullable()
-                .transform((value) => value ?? ''),
-            }),
-        ],
       ])(
         'ends paging when a zod v3 row schema (%s) reads NULL as a value',
-        async (_label, rowSchema) => {
-          const rowService = createService({
-            table: 'users',
-            db,
-            rowSchema: rowSchema() as unknown as typeof UserRowSchema,
-            createSchema: UserCreateSchema,
-            updateSchema: UserUpdateSchema,
-          })
-          const tenant = `tenant-v3-${_label}`
-          const insert = bunDb.prepare(
-            `INSERT INTO users (name, email, tenant_id, created_at, updated_at)
-             VALUES (?, ?, ?, '2024-01-01T00:00:00Z', ?)`,
-          )
-          for (const [i, value] of ['2024-02-01', null, null, null].entries()) {
-            insert.run(`V3 ${i}`, `v3-${_label}-${i}@test.com`, tenant, value)
-          }
-
-          const seen: number[] = []
-          let cursor: string | undefined
-          let pages = 0
-          for (; pages < 20; pages++) {
-            const res = await rowService.list({
-              auth: {},
-              where: { tenant_id: tenant },
-              orderBy: [
-                { column: 'updated_at', direction: 'desc' },
-                { column: 'id', direction: 'desc' },
-              ],
-              limit: 1,
-              ...(cursor ? { cursor } : {}),
-            })
-            seen.push(...res.result.map((r: { id: number }) => r.id))
-            if (!res.nextCursor) break
-            cursor = res.nextCursor
-          }
+        async (label, rowSchema) => {
+          const { pages, seen } = await pageV3(label, rowSchema())
 
           expect(pages).toBeLessThan(20)
           expect(new Set(seen).size).toBe(seen.length)
         },
       )
+
+      it('ends paging when a field of a zod v3 row schema reads NULL as a value', async () => {
+        // A plain v3 object keeps its `.shape`, so its fields are read one by
+        // one (`columnAcceptsNull`), as they were before v3 wrappers counted
+        // as rewriting. This passed without that change too.
+        const { pages, seen } = await pageV3(
+          'field',
+          UserRowSchemaV3.extend({
+            updated_at: z3
+              .string()
+              .nullable()
+              .transform((value) => value ?? ''),
+          }),
+        )
+
+        expect(pages).toBeLessThan(20)
+        expect(new Set(seen).size).toBe(seen.length)
+      })
 
       it('keeps joined and exposed columns NULL-aware under a row schema that rewrites the row', () => {
         // Join data and exposed columns are added to the row after the row

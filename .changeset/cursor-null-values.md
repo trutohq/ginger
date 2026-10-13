@@ -23,5 +23,7 @@ every table column of a row schema that isn't a plain `z.object`
 (`.transform()`, `z.preprocess()`, `.pipe()`, `.catch()`, `.default()`, the
 same wrapped in `.nullable()`, `.readonly()` or `z.lazy()`, or a shapeless
 `z.record()` or `z.any()`), or that has an `.overwrite()` check: it may turn
-any column's NULL into a value. Joined and exposed columns are added after the
-row schema runs, and stay NULL-aware. Cursor tokens are unchanged.
+any column's NULL into a value. The same goes for zod's v3 API (`import { z }
+from 'zod'` on zod 3.x), where `.refine()` also wraps the object and so counts
+too. Joined and exposed columns are added after the row schema runs, and stay
+NULL-aware. Cursor tokens are unchanged.

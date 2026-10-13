@@ -1,5 +1,6 @@
 import { Database as BunDatabase } from 'bun:sqlite'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { z as z3 } from 'zod/v3'
 import { z } from 'zod/v4'
 import { fromBunSqlite } from './adapters/bun-sqlite.js'
 import {
@@ -809,6 +810,93 @@ describe('Ginger Library - Comprehensive Tests', () => {
           )
           for (const [i, value] of ['2024-02-01', null, null, null].entries()) {
             insert.run(`Row ${i}`, `row-${_label}-${i}@test.com`, tenant, value)
+          }
+
+          const seen: number[] = []
+          let cursor: string | undefined
+          let pages = 0
+          for (; pages < 20; pages++) {
+            const res = await rowService.list({
+              auth: {},
+              where: { tenant_id: tenant },
+              orderBy: [
+                { column: 'updated_at', direction: 'desc' },
+                { column: 'id', direction: 'desc' },
+              ],
+              limit: 1,
+              ...(cursor ? { cursor } : {}),
+            })
+            seen.push(...res.result.map((r: { id: number }) => r.id))
+            if (!res.nextCursor) break
+            cursor = res.nextCursor
+          }
+
+          expect(pages).toBeLessThan(20)
+          expect(new Set(seen).size).toBe(seen.length)
+        },
+      )
+
+      // The same row schemas in zod's v3 API, which `import { z } from 'zod'`
+      // still gives on zod 3.x. A v3 schema has no `_zod`, and anything but a
+      // plain `z.object` has no `.shape`, so these read as rewriting too.
+      const UserRowSchemaV3 = z3.object({
+        id: z3.number(),
+        name: z3.string(),
+        email: z3.string(),
+        tenant_id: z3.string(),
+        created_at: z3.string(),
+        updated_at: z3.string().nullable().optional(),
+      })
+      const fillUpdatedAtV3 = (row: z3.infer<typeof UserRowSchemaV3>) => ({
+        ...row,
+        updated_at: row.updated_at ?? '',
+      })
+
+      it.each([
+        ['.transform()', () => UserRowSchemaV3.transform(fillUpdatedAtV3)],
+        [
+          '.transform().nullable()',
+          () => UserRowSchemaV3.transform(fillUpdatedAtV3).nullable(),
+        ],
+        [
+          'z.preprocess()',
+          () =>
+            z3.preprocess(
+              (row) => ({
+                ...(row as object),
+                updated_at:
+                  (row as { updated_at?: string | null }).updated_at ?? '',
+              }),
+              UserRowSchemaV3,
+            ),
+        ],
+        [
+          'a field that reads NULL as a value',
+          () =>
+            UserRowSchemaV3.extend({
+              updated_at: z3
+                .string()
+                .nullable()
+                .transform((value) => value ?? ''),
+            }),
+        ],
+      ])(
+        'ends paging when a zod v3 row schema (%s) reads NULL as a value',
+        async (_label, rowSchema) => {
+          const rowService = createService({
+            table: 'users',
+            db,
+            rowSchema: rowSchema() as unknown as typeof UserRowSchema,
+            createSchema: UserCreateSchema,
+            updateSchema: UserUpdateSchema,
+          })
+          const tenant = `tenant-v3-${_label}`
+          const insert = bunDb.prepare(
+            `INSERT INTO users (name, email, tenant_id, created_at, updated_at)
+             VALUES (?, ?, ?, '2024-01-01T00:00:00Z', ?)`,
+          )
+          for (const [i, value] of ['2024-02-01', null, null, null].entries()) {
+            insert.run(`V3 ${i}`, `v3-${_label}-${i}@test.com`, tenant, value)
           }
 
           const seen: number[] = []

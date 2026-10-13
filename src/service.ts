@@ -79,7 +79,11 @@ interface ParsedSelect {
  * `.catch()` and `.default()` read the row as something else, and wrapped
  * again (`.nullable()`, `.readonly()`, `z.lazy()`) they hide it. A plain
  * object may too, with an `.overwrite()` check. `.refine()` changes no value.
- * A schema that isn't zod v4 is read by its shape alone, as before.
+ *
+ * A schema that isn't zod v4, such as zod's v3 API (`import { z } from 'zod'`
+ * on zod 3.x), is read by its `.shape`: a v3 `z.object` has one, and every
+ * wrapper above takes it away. So does a v3 `.refine()`, which wraps the
+ * object too and so counts as well.
  */
 function rowSchemaMayRewrite(schema: unknown): boolean {
   const def = (
@@ -92,7 +96,7 @@ function rowSchemaMayRewrite(schema: unknown): boolean {
       }
     }
   )?._zod?.def
-  if (!def) return false
+  if (!def) return !(schema as { shape?: unknown } | undefined)?.shape
   if (def.type !== 'object') return true
   return (def.checks ?? []).some(
     (check) => check?._zod?.def?.check === 'overwrite',

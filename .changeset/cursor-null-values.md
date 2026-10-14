@@ -11,19 +11,16 @@ listing: the `col = ?` equality prefix matched nothing, and `col > ?` against
 NULL matched nothing either. On DESC, the NULL rows, which come last, were
 never reached at all.
 
-For a joined or exposed column, a table column a plain `z.object` row schema
-doesn't describe, a field that reads NULL as NULL, and any NULL cursor value,
-the cursor conditions are now NULL-aware: `col IS ?` for the equality prefix,
+For a joined or exposed column, a table column the row schema doesn't
+describe field by field (any schema but a plain `z.object`), a field that
+accepts NULL, whatever it reads NULL as, and any NULL cursor value, the
+cursor conditions are now NULL-aware: `col IS ?` for the equality prefix,
 `col IS NOT NULL` after a NULL toward larger values, and `(col < ? OR col IS
-NULL)` before a value. A field that rejects NULL, or reads it as another value
-(a `.transform`, a `.catch`, a `z.coerce` without `.nullable()`), keeps
-byte-identical SQL: its cursors carry that value, not NULL, so its NULL rows
-past a page boundary are still skipped, in either direction, as before. So does
-every table column of a row schema that isn't a plain `z.object`
-(`.transform()`, `z.preprocess()`, `.pipe()`, `.catch()`, `.default()`, the
-same wrapped in `.nullable()`, `.readonly()` or `z.lazy()`, or a shapeless
-`z.record()` or `z.any()`), or that has an `.overwrite()` check: it may turn
-any column's NULL into a value. The same goes for zod's v3 API (`import { z }
-from 'zod'` on zod 3.x), where `.refine()` also wraps the object and so counts
-too. Joined and exposed columns are added after the row schema runs, and stay
-NULL-aware. Cursor tokens are unchanged.
+NULL)` before a value. A cursor carries the stored values (see
+`cursor-values-as-stored`), so a NULL in it is a stored NULL. A field that
+rejects NULL keeps byte-identical SQL. The cursor format is unchanged.
+
+`buildCursorConditions` takes an optional fourth argument,
+`isNullable(column)`, which decides that per column. It defaults to
+`() => false`, the SQL from before, so a direct caller that orders by a
+nullable column should pass it.

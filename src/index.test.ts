@@ -724,10 +724,12 @@ describe('Ginger Library - Comprehensive Tests', () => {
         }
       })
 
-      it('ends paging on a field the row schema reads from NULL as a value', async () => {
-        // The field accepts NULL but reads it as ''. Counted as nullable, its
-        // DESC condition became `(col < '' OR col IS NULL)`, which the stored
-        // NULL rows met on every page: the listing never ended.
+      it('pages exactly on a field the row schema reads from NULL as a value', async () => {
+        // The field accepts NULL but reads it as ''. With the cursor built
+        // from the parsed row, its DESC condition `(col < '' OR col IS NULL)`
+        // met the stored NULL rows on every page and the listing never ended;
+        // counted as not nullable instead, the NULL rows after a non-NULL
+        // boundary were skipped. The cursor now holds the stored value.
         const blankService = createService({
           table: 'users',
           db,
@@ -747,11 +749,18 @@ describe('Ginger Library - Comprehensive Tests', () => {
         for (const [i, value] of ['2024-02-01', null, null, null].entries()) {
           insert.run(`Blank ${i}`, `blank-${i}@test.com`, value)
         }
+        const expected = (
+          bunDb
+            .prepare(
+              `SELECT id FROM users WHERE tenant_id = 'tenant-blank'
+               ORDER BY updated_at DESC, id DESC`,
+            )
+            .all() as Array<{ id: number }>
+        ).map((r) => r.id)
 
         const seen: number[] = []
         let cursor: string | undefined
-        let pages = 0
-        for (; pages < 20; pages++) {
+        for (let page = 0; page < 20; page++) {
           const res = await blankService.list({
             auth: {},
             where: { tenant_id: 'tenant-blank' },
@@ -767,8 +776,7 @@ describe('Ginger Library - Comprehensive Tests', () => {
           cursor = res.nextCursor
         }
 
-        expect(pages).toBeLessThan(20)
-        expect(new Set(seen).size).toBe(seen.length)
+        expect(seen).toEqual(expected)
       })
 
       const fillUpdatedAt = (row: z.infer<typeof UserRowSchema>) => ({
@@ -833,12 +841,15 @@ describe('Ginger Library - Comprehensive Tests', () => {
 
           expect(pages).toBeLessThan(20)
           expect(new Set(seen).size).toBe(seen.length)
+          // Every row, the NULL ones included.
+          expect(seen).toHaveLength(4)
         },
       )
 
       // The same row schemas in zod's v3 API, which `import { z } from 'zod'`
-      // still gives on zod 3.x. A v3 schema has no `_zod`, and anything but a
-      // plain `z.object` has no `.shape`, so these read as rewriting too.
+      // still gives on zod 3.x. Anything but a plain v3 `z.object` has no
+      // `.shape`, so no field is read on its own and every column pages
+      // NULL-aware, over the stored values the cursor carries.
       const UserRowSchemaV3 = z3.object({
         id: z3.number(),
         name: z3.string(),
@@ -916,13 +927,14 @@ describe('Ginger Library - Comprehensive Tests', () => {
 
           expect(pages).toBeLessThan(20)
           expect(new Set(seen).size).toBe(seen.length)
+          // Every row, the NULL ones included.
+          expect(seen).toHaveLength(4)
         },
       )
 
       it('ends paging when a field of a zod v3 row schema reads NULL as a value', async () => {
         // A plain v3 object keeps its `.shape`, so its fields are read one by
-        // one (`columnAcceptsNull`), as they were before v3 wrappers counted
-        // as rewriting. This passed without that change too.
+        // one (`columnAcceptsNull`).
         const { pages, seen } = await pageV3(
           'field',
           UserRowSchemaV3.extend({
@@ -935,11 +947,73 @@ describe('Ginger Library - Comprehensive Tests', () => {
 
         expect(pages).toBeLessThan(20)
         expect(new Set(seen).size).toBe(seen.length)
+        expect(seen).toHaveLength(4)
       })
 
-      it('keeps joined and exposed columns NULL-aware under a row schema that rewrites the row', () => {
-        // Join data and exposed columns are added to the row after the row
-        // schema runs, so it can't turn their NULLs into values.
+      it.each(['asc', 'desc'] as const)(
+        'pages every row exactly once, %s, when a field reads a stored value as NULL',
+        async (direction) => {
+          // Built from the parsed row, a cursor held NULL for a stored value
+          // the field reads as NULL (`'garbage'` through `.catch(null)`), and
+          // the next page started over at the first non-NULL row, so an ASC
+          // listing never ended. The cursor holds the stored value now.
+          const rowService = createService({
+            table: 'users',
+            db,
+            rowSchema: UserRowSchema.extend({
+              updated_at: z.iso.date().nullable().catch(null),
+            }),
+            createSchema: UserCreateSchema,
+            updateSchema: UserUpdateSchema,
+          })
+          const insert = bunDb.prepare(
+            `INSERT INTO users (name, email, tenant_id, created_at, updated_at)
+             VALUES (?, ?, 'tenant-garbage', '2024-01-01T00:00:00Z', ?)`,
+          )
+          for (let i = 0; i < 20; i++) {
+            insert.run(
+              `Garbage ${i}`,
+              `garbage-${i}@test.com`,
+              i % 3 === 0
+                ? 'garbage'
+                : `2024-01-${String(10 + i).padStart(2, '0')}`,
+            )
+          }
+          const expected = (
+            bunDb
+              .prepare(
+                `SELECT id FROM users WHERE tenant_id = 'tenant-garbage'
+                 ORDER BY updated_at ${direction}, id ${direction}`,
+              )
+              .all() as Array<{ id: number }>
+          ).map((r) => r.id)
+
+          const seen: number[] = []
+          let cursor: string | undefined
+          for (let page = 0; page < 40; page++) {
+            const res = await rowService.list({
+              auth: {},
+              where: { tenant_id: 'tenant-garbage' },
+              orderBy: [
+                { column: 'updated_at', direction },
+                { column: 'id', direction },
+              ],
+              limit: 2,
+              ...(cursor ? { cursor } : {}),
+            })
+            seen.push(...res.result.map((r: { id: number }) => r.id))
+            if (!res.nextCursor) break
+            cursor = res.nextCursor
+          }
+
+          expect(seen).toEqual(expected)
+        },
+      )
+
+      it('counts every column NULL-aware under a row schema that rewrites the row, joined and exposed ones too', () => {
+        // A cursor carries the stored value, so a column whose NULL the
+        // schema may read as a value still pages NULL-aware. Join data and
+        // exposed columns are added to the row after the row schema runs.
         const rowService = createService({
           table: 'users',
           db,
@@ -953,7 +1027,7 @@ describe('Ginger Library - Comprehensive Tests', () => {
           columnAcceptsNull(column: string): boolean
         }
 
-        expect(rowService.columnAcceptsNull('updated_at')).toBe(false)
+        expect(rowService.columnAcceptsNull('updated_at')).toBe(true)
         expect(rowService.columnAcceptsNull('$profile.bio')).toBe(true)
         expect(rowService.columnAcceptsNull('bio')).toBe(true)
       })
@@ -993,6 +1067,188 @@ describe('Ginger Library - Comprehensive Tests', () => {
         expect(
           unscoped.result.map((r: { tenant_id: string }) => r.tenant_id),
         ).toContain('tenant-2')
+      })
+
+      it('pages on a column the row schema parses into a Date, both orders', async () => {
+        // Stored as SQLite writes CURRENT_TIMESTAMP (`YYYY-MM-DD HH:MM:SS`),
+        // read by the row schema as a Date. The cursor carried the parsed
+        // value, which serialises as ISO text (`…T…Z`), and the next page
+        // compared that with the stored text. `T` sorts after a space, so DESC
+        // served the last row of a page again and ASC skipped the rest of its
+        // day.
+        const datedService = createService({
+          table: 'users',
+          db,
+          rowSchema: UserRowSchema.extend({ created_at: z.coerce.date() }),
+          createSchema: UserCreateSchema,
+          updateSchema: UserUpdateSchema,
+        })
+        const insert = bunDb.prepare(
+          `INSERT INTO users (name, email, tenant_id, created_at)
+           VALUES (?, ?, 'tenant-dated', ?)`,
+        )
+        const createdAt = [
+          '2024-03-01 10:00:02',
+          '2024-03-01 10:00:00',
+          '2024-03-02 09:00:00',
+          '2024-03-01 10:00:01',
+          '2024-02-29 23:59:59',
+        ]
+        for (const [i, value] of createdAt.entries()) {
+          insert.run(`Dated ${i}`, `dated-${i}@test.com`, value)
+        }
+
+        for (const direction of ['asc', 'desc'] as const) {
+          const expected = (
+            bunDb
+              .prepare(
+                `SELECT id FROM users WHERE tenant_id = 'tenant-dated'
+                 ORDER BY created_at ${direction.toUpperCase()}`,
+              )
+              .all() as Array<{ id: number }>
+          ).map((r) => r.id)
+
+          const seen: number[] = []
+          let cursor: string | undefined
+          for (let page = 0; page < 10; page++) {
+            const res = await datedService.list({
+              auth: {},
+              where: { tenant_id: 'tenant-dated' },
+              orderBy: [{ column: 'created_at', direction }],
+              limit: 2,
+              ...(cursor ? { cursor } : {}),
+            })
+            seen.push(...res.result.map((r: { id: number }) => r.id))
+            if (!res.nextCursor) break
+            cursor = res.nextCursor
+          }
+
+          expect(seen, direction).toEqual(expected)
+        }
+
+        // The rows are still read through the schema.
+        const first = await datedService.list({
+          auth: {},
+          where: { tenant_id: 'tenant-dated' },
+          orderBy: [{ column: 'created_at', direction: 'desc' }],
+          limit: 1,
+        })
+        expect(first.result[0].created_at).toBeInstanceOf(Date)
+      })
+
+      it('falls back to the parsed value for a stored value a cursor cannot carry', async () => {
+        // bun:sqlite with `safeIntegers` returns INTEGER columns as bigint,
+        // which JSON can't hold; the row schema reads it as a number.
+        const bigDb = new BunDatabase(':memory:', { safeIntegers: true })
+        bigDb.exec(
+          `CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)`,
+        )
+        for (const name of ['a', 'b', 'c']) {
+          bigDb.prepare('INSERT INTO items (name) VALUES (?)').run(name)
+        }
+        const itemService = createService({
+          table: 'items',
+          db: fromBunSqlite(bigDb),
+          rowSchema: z.object({ id: z.coerce.number(), name: z.string() }),
+          createSchema: z.object({ name: z.string() }),
+          updateSchema: z.object({ name: z.string().optional() }),
+        })
+
+        const seen: number[] = []
+        let cursor: string | undefined
+        for (let page = 0; page < 10; page++) {
+          const res = await itemService.list({
+            auth: {},
+            limit: 1,
+            ...(cursor ? { cursor } : {}),
+          })
+          seen.push(...res.result.map((r: { id: number }) => r.id))
+          if (!res.nextCursor) break
+          cursor = res.nextCursor
+        }
+        bigDb.close()
+
+        expect(seen).toEqual([1, 2, 3])
+      })
+
+      it('builds no cursor over a column the response leaves out', async () => {
+        // A cursor is readable, and its own orderBy orders the next page, so
+        // one over a column the response drops would read that column out.
+        const secretDb = new BunDatabase(':memory:')
+        secretDb.exec(
+          `CREATE TABLE accounts (id INTEGER PRIMARY KEY, name TEXT NOT NULL, password_hash TEXT NOT NULL);
+           INSERT INTO accounts (name, password_hash) VALUES ('a', 'hash-a'), ('b', 'hash-b');`,
+        )
+        const accountService = createService({
+          table: 'accounts',
+          db: fromBunSqlite(secretDb),
+          // A whole-object transform: no shape, and no `password_hash` out.
+          rowSchema: z
+            .object({
+              id: z.number(),
+              name: z.string(),
+              password_hash: z.string(),
+            })
+            .transform(({ password_hash: _hash, ...rest }) => rest),
+          createSchema: z.object({ name: z.string() }),
+          updateSchema: z.object({ name: z.string().optional() }),
+        })
+
+        await expect(
+          accountService.list({
+            auth: {},
+            orderBy: [{ column: 'password_hash', direction: 'asc' }],
+            limit: 1,
+          }),
+        ).rejects.toThrow('not found in row for cursor creation')
+        secretDb.close()
+      })
+
+      it('builds no cursor over a column of a join the response leaves out', async () => {
+        const noteDb = new BunDatabase(':memory:')
+        noteDb.exec(
+          `CREATE TABLE accounts (id TEXT PRIMARY KEY, team_id TEXT NOT NULL);
+           CREATE TABLE teams (id TEXT PRIMARY KEY, region TEXT NOT NULL, note TEXT);
+           INSERT INTO teams VALUES ('t-1', 'eu', 'note-1'), ('t-2', 'us', 'note-2');
+           INSERT INTO accounts VALUES ('a-1', 't-1'), ('a-2', 't-2');`,
+        )
+        const accountService = createService({
+          table: 'accounts',
+          db: fromBunSqlite(noteDb),
+          rowSchema: z.object({ id: z.string(), team_id: z.string() }),
+          createSchema: z.object({ id: z.string() }),
+          updateSchema: z.object({ team_id: z.string().optional() }),
+          joins: {
+            team: {
+              kind: 'one' as const,
+              localColumn: 'team_id',
+              remote: {
+                table: 'teams',
+                pk: 'id',
+                select: ['id', 'region', 'note'],
+              },
+              schema: z.object({ id: z.string() }),
+            },
+          },
+          // The join is resolved for this alone; `note` is never returned.
+          expose: [{ from: '$team.region', as: 'region' }],
+        })
+        // A hand-made cursor that orders by the join's `note`.
+        const cursor = btoa(
+          JSON.stringify({
+            orderBy: [
+              { column: '$team.note', direction: 'asc' },
+              { column: 'id', direction: 'asc' },
+            ],
+            values: ['', ''],
+            direction: 'next',
+          }),
+        )
+
+        await expect(
+          accountService.list({ auth: {}, limit: 1, cursor }),
+        ).rejects.toThrow('not found in row for cursor creation')
+        noteDb.close()
       })
 
       it('should handle cursor conditions correctly', () => {
@@ -2888,6 +3144,33 @@ describe('Ginger Library - Comprehensive Tests', () => {
       })
 
       expect(page.result.map((r) => r.id)).toEqual(['ia-2', 'ia-1', 'ia-3'])
+    })
+
+    it('pages by joined column $integration.name', async () => {
+      // The cursor reads the joined value from the row as the query returned
+      // it, under its flat key; from the nested parsed row it threw
+      // "not found in row for cursor creation" on any page with a next one.
+      const ids: string[] = []
+      let cursor: string | undefined
+      for (let page = 0; page < 5; page++) {
+        const res = await iaService.list({
+          auth: {},
+          orderBy: [
+            { column: '$integration.name', direction: 'asc' },
+            { column: 'id', direction: 'asc' },
+          ],
+          include: {
+            environment_integration: { integration: true },
+          },
+          limit: 1,
+          ...(cursor ? { cursor } : {}),
+        })
+        ids.push(...res.result.map((r) => r.id))
+        if (!res.nextCursor) break
+        cursor = res.nextCursor
+      }
+
+      expect(ids).toEqual(['ia-2', 'ia-1', 'ia-3'])
     })
 
     it('orders by exposed environment_id column', async () => {

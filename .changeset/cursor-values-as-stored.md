@@ -35,7 +35,12 @@ isn't always the one it returned before. Where the NULL-aware conditions
 around NULLs. Over a transformed column, an older cursor holds the parsed
 value, which that page compares with the stored values, as before: ordered
 DESC by a field that reads NULL as `'none'`, an older cursor holding `'none'`
-returned rows already listed, and now returns those and the NULL rows too.
+returned rows already listed, and now returns those and the NULL rows too. So
+an older cursor over a transformed column can still skip rows on that page, as
+it did: one over a `z.coerce.date()` field holds ISO text, which sorts after
+the stored `YYYY-MM-DD HH:MM:SS` text of the same day, so an ASC page skips the
+rest of that day for good. Start such a listing again, without a cursor, to
+page it exactly.
 
 Cursors are base64 JSON, neither encrypted nor signed, and a cursor's own
 `orderBy` orders the page it fetches. A cursor now holds the stored value of

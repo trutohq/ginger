@@ -473,9 +473,6 @@ export class Service<
       const resolveColumn = (column: string) =>
         resolveOrderByColumn(column, this.table, resolvedJoins, this.expose)
 
-      const cursorFlatKey = (column: string) =>
-        flatColumnKeyForOrderBy(column, this.table, resolvedJoins, this.expose)
-
       // Handle cursor pagination
       let cursorConditions: ReturnType<typeof sql> | undefined
       let actualLimit = limit + 1 // Fetch one extra to determine if there's a next page
@@ -615,41 +612,82 @@ export class Service<
       // fallback for a value the query returned under no flat key, or in a
       // form a cursor can't carry (a driver's bigint, say).
       //
-      // Only for a column the response carries, a joined one only when its
-      // join is included. A cursor is readable, and its own orderBy orders
-      // the page it fetches, so a stored value of any other column (one a
-      // shapeless row schema drops, a join resolved only for `expose`) would
-      // hand the caller what the response leaves out. Without `select`, such
-      // a column still fails when the cursor is built, as it did before; a
-      // `select` projection returns stored values unparsed, and carries it.
+      // Only for a column the response carries. A cursor is readable, and
+      // its own orderBy orders the page it fetches, so a stored value of any
+      // other column (one a shapeless row schema drops, one a row schema sets
+      // to `undefined`, one of a join resolved only for `expose`) would hand
+      // the caller what the response leaves out. Without `select`, building
+      // a cursor over such a column fails; a `select` projection returns
+      // stored values unparsed, and carries it. The response carries a row's
+      // own keys, which is what JSON keeps (not `constructor`, which every
+      // row inherits), except one holding `undefined`. Over a stored NULL,
+      // that key says no more than the NULL does (a field that leaves NULL
+      // out of the response), so it carries the NULL.
+      //
+      // A joined column is carried when the query selected it for its join,
+      // the join is included, and it and every join above it is a `one` join
+      // (`list` returns a `many` join as `[]`). A joined column the query
+      // didn't select has no key of its own: its flat name (`profile_secret`
+      // for `$profile.secret`) can be a column of the base table. The
+      // fallback below still reads the parsed row under that name, as it did
+      // before, so all it can take is a value the response carries.
+      const cursorFlatKey = (column: string) =>
+        flatColumnKeyForOrderBy(
+          column,
+          this.table,
+          resolvedJoinsForQuery,
+          this.expose,
+        )
+      const holds = (row: Record<string, unknown>, key: string): boolean =>
+        Object.hasOwn(row, key) && row[key] !== undefined
       const carriedInRow = (
         column: string,
         parsed: Record<string, unknown>,
+        storedValue: unknown,
       ): boolean => {
-        if (!column.startsWith('$')) return column in parsed
-        const { joinPath } = parseQualifiedPath(column)
+        if (!column.startsWith('$')) {
+          return (
+            holds(parsed, column) ||
+            (Object.hasOwn(parsed, column) && storedValue === null)
+          )
+        }
+        const { joinPath, column: joinColumn } = parseQualifiedPath(column)
         const join =
-          resolvedJoins.find((r) => r.path === joinPath) ??
-          resolvedJoins.find(
+          resolvedJoinsForQuery.find((r) => r.path === joinPath) ??
+          resolvedJoinsForQuery.find(
             (r) => r.name === joinPath || r.sqlTable === joinPath,
           )
-        return !!join && this.isJoinPathIncluded(join.path, include)
+        if (
+          !join ||
+          !join.select.includes(joinColumn) ||
+          !this.isJoinPathIncluded(join.path, include)
+        ) {
+          return false
+        }
+        let defs: Record<string, JoinDef> | undefined = this.joins
+        for (const name of join.path.split('.')) {
+          const def: JoinDef | undefined = defs?.[name]
+          if (def?.kind !== 'one') return false
+          defs = def.joins
+        }
+        return true
       }
       const cursorRowAt = (index: number): Record<string, unknown> => {
         const parsed = validatedRows[index]! as Record<string, unknown>
         const stored = rows[index]!
-        const cursorRow = { ...parsed }
+        // Just the order-by values, with no prototype, so a column neither
+        // branch below sets is missing and fails in `createCursor`.
+        const cursorRow: Record<string, unknown> = Object.create(null)
         for (const order of orderBy) {
           const flatKey = cursorFlatKey(order.column)
           const value = stored[flatKey]
           if (
-            carriedInRow(order.column, parsed) &&
-            flatKey in stored &&
+            carriedInRow(order.column, parsed, value) &&
             (value === null ||
               ['string', 'number', 'boolean'].includes(typeof value))
           ) {
             cursorRow[order.column] = value
-          } else if (flatKey !== order.column && flatKey in parsed) {
+          } else if (holds(parsed, flatKey)) {
             cursorRow[order.column] = parsed[flatKey]
           }
         }

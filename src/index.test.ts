@@ -1251,6 +1251,257 @@ describe('Ginger Library - Comprehensive Tests', () => {
         noteDb.close()
       })
 
+      it('builds no cursor over a column the row schema sets to undefined', async () => {
+        // The key stays on the parsed row, holding `undefined`, which the
+        // JSON response drops.
+        const secretDb = new BunDatabase(':memory:')
+        secretDb.exec(
+          `CREATE TABLE accounts (id INTEGER PRIMARY KEY, name TEXT NOT NULL, password_hash TEXT NOT NULL);
+           INSERT INTO accounts (name, password_hash) VALUES ('a', 'hash-a'), ('b', 'hash-b');`,
+        )
+        const accountService = createService({
+          table: 'accounts',
+          db: fromBunSqlite(secretDb),
+          rowSchema: z
+            .object({
+              id: z.number(),
+              name: z.string(),
+              password_hash: z.string(),
+            })
+            .transform((row) => ({ ...row, password_hash: undefined })),
+          createSchema: z.object({ name: z.string() }),
+          updateSchema: z.object({ name: z.string().optional() }),
+        })
+
+        await expect(
+          accountService.list({
+            auth: {},
+            orderBy: [{ column: 'password_hash', direction: 'asc' }],
+            limit: 1,
+          }),
+        ).rejects.toThrow('not found in row for cursor creation')
+        secretDb.close()
+      })
+
+      it('builds no cursor over a column the row schema drops whose name every object inherits', async () => {
+        // `'constructor' in row` is true of any object, through its
+        // prototype, though the JSON response has no such key.
+        const carDb = new BunDatabase(':memory:')
+        carDb.exec(
+          `CREATE TABLE cars (id INTEGER PRIMARY KEY, name TEXT NOT NULL, "constructor" TEXT NOT NULL);
+           INSERT INTO cars VALUES (1, 'a', 'maker-b'), (2, 'b', 'maker-a');`,
+        )
+        const carService = createService({
+          table: 'cars',
+          db: fromBunSqlite(carDb),
+          rowSchema: z
+            .object({
+              id: z.number(),
+              name: z.string(),
+              constructor: z.string(),
+            })
+            .transform(({ constructor: _maker, ...rest }) => rest),
+          createSchema: z.object({ name: z.string() }),
+          updateSchema: z.object({ name: z.string().optional() }),
+        })
+
+        await expect(
+          carService.list({
+            auth: {},
+            orderBy: [{ column: 'constructor', direction: 'asc' }],
+            limit: 1,
+          }),
+        ).rejects.toThrow('not found in row for cursor creation')
+        carDb.close()
+      })
+
+      it.each(['asc', 'desc'] as const)(
+        'pages %s past the NULLs of a field the row schema reads as undefined',
+        async (direction) => {
+          // The field leaves NULL out of the JSON response. The key holds
+          // `undefined` over a stored NULL, which says no more than NULL.
+          const omitService = createService({
+            table: 'users',
+            db,
+            rowSchema: UserRowSchema.extend({
+              updated_at: z
+                .string()
+                .nullable()
+                .transform((value) => value ?? undefined),
+            }),
+            createSchema: UserCreateSchema,
+            updateSchema: UserUpdateSchema,
+          })
+          const insert = bunDb.prepare(
+            `INSERT INTO users (name, email, tenant_id, created_at, updated_at)
+             VALUES (?, ?, 'tenant-omit', '2024-01-01T00:00:00Z', ?)`,
+          )
+          const updatedAt = [
+            '2024-02-02',
+            null,
+            '2024-02-01',
+            null,
+            '2024-02-03',
+          ]
+          for (const [i, value] of updatedAt.entries()) {
+            insert.run(`Omit ${i}`, `omit-${i}@test.com`, value)
+          }
+          const expected = (
+            bunDb
+              .prepare(
+                `SELECT id FROM users WHERE tenant_id = 'tenant-omit'
+                 ORDER BY updated_at ${direction}, id ${direction}`,
+              )
+              .all() as Array<{ id: number }>
+          ).map((r) => r.id)
+
+          const seen: number[] = []
+          let cursor: string | undefined
+          for (let page = 0; page < 10; page++) {
+            const res = await omitService.list({
+              auth: {},
+              where: { tenant_id: 'tenant-omit' },
+              orderBy: [
+                { column: 'updated_at', direction },
+                { column: 'id', direction },
+              ],
+              limit: 1,
+              ...(cursor ? { cursor } : {}),
+            })
+            seen.push(...res.result.map((r: { id: number }) => r.id))
+            if (!res.nextCursor) break
+            cursor = res.nextCursor
+          }
+
+          expect(seen).toEqual(expected)
+        },
+      )
+
+      it('builds no cursor from another column under the flat name of a joined column the query leaves out', async () => {
+        // The join doesn't select `secret`, so the query returns
+        // `$profile.secret` under no key. Its flat name, `profile_secret`, is
+        // a column of the base table, one the row schema drops.
+        const profileDb = new BunDatabase(':memory:')
+        profileDb.exec(
+          `CREATE TABLE accounts (id INTEGER PRIMARY KEY, name TEXT NOT NULL, profile_secret TEXT NOT NULL);
+           CREATE TABLE profiles (account_id INTEGER PRIMARY KEY, bio TEXT, secret TEXT);
+           INSERT INTO accounts VALUES (1, 'a', 'hidden-1'), (2, 'b', 'hidden-2');
+           INSERT INTO profiles VALUES (1, 'bio-1', 's-2'), (2, 'bio-2', 's-1');`,
+        )
+        const accountService = createService({
+          table: 'accounts',
+          db: fromBunSqlite(profileDb),
+          rowSchema: z
+            .object({
+              id: z.number(),
+              name: z.string(),
+              profile_secret: z.string(),
+            })
+            .transform(({ profile_secret: _secret, ...rest }) => rest),
+          createSchema: z.object({ name: z.string() }),
+          updateSchema: z.object({ name: z.string().optional() }),
+          joins: {
+            profile: {
+              kind: 'one' as const,
+              localPk: 'id',
+              remote: { table: 'profiles', pk: 'account_id', select: ['bio'] },
+              schema: z.object({ bio: z.string() }),
+            },
+          },
+        })
+
+        await expect(
+          accountService.list({
+            auth: {},
+            include: { profile: true },
+            orderBy: [
+              { column: '$profile.secret', direction: 'asc' },
+              { column: 'id', direction: 'asc' },
+            ],
+            limit: 1,
+          }),
+        ).rejects.toThrow('not found in row for cursor creation')
+        profileDb.close()
+      })
+
+      it('builds no cursor over a column of a many join, which list returns empty', async () => {
+        const teamService = createService({
+          table: 'users',
+          db,
+          rowSchema: UserRowSchema,
+          createSchema: UserCreateSchema,
+          updateSchema: UserUpdateSchema,
+          joins: userJoins,
+        })
+
+        // The row comes back with `teams: []`, so a team's name in a cursor
+        // would be a value the response leaves out.
+        await expect(
+          teamService.list({
+            auth: {},
+            include: { teams: true },
+            orderBy: [
+              { column: '$teams.name', direction: 'desc' },
+              { column: 'id', direction: 'desc' },
+            ],
+            limit: 1,
+          }),
+        ).rejects.toThrow('not found in row for cursor creation')
+      })
+
+      it('builds no cursor over a column of a one join under a many join', async () => {
+        const leadDb = new BunDatabase(':memory:')
+        leadDb.exec(
+          `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+           CREATE TABLE memberships (user_id INTEGER NOT NULL, lead_id INTEGER);
+           CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT);
+           INSERT INTO users VALUES (1, 'a'), (2, 'b');
+           INSERT INTO people VALUES (1, 'Lead-B'), (2, 'Lead-A');
+           INSERT INTO memberships VALUES (1, 1), (2, 2);`,
+        )
+        const userService = createService({
+          table: 'users',
+          db: fromBunSqlite(leadDb),
+          rowSchema: z.object({ id: z.number(), name: z.string() }),
+          createSchema: z.object({ name: z.string() }),
+          updateSchema: z.object({ name: z.string().optional() }),
+          joins: {
+            memberships: {
+              kind: 'many' as const,
+              localPk: 'id',
+              remote: {
+                table: 'memberships',
+                pk: 'user_id',
+                select: ['lead_id'],
+              },
+              schema: z.object({ lead_id: z.number() }),
+              joins: {
+                lead: {
+                  kind: 'one' as const,
+                  localColumn: 'lead_id',
+                  remote: { table: 'people', pk: 'id', select: ['name'] },
+                  schema: z.object({ name: z.string() }),
+                },
+              },
+            },
+          },
+        })
+
+        // The row comes back with `memberships: []`, the lead's name nowhere.
+        await expect(
+          userService.list({
+            auth: {},
+            include: { memberships: { lead: true } },
+            orderBy: [
+              { column: '$memberships.lead.name', direction: 'asc' },
+              { column: 'id', direction: 'asc' },
+            ],
+            limit: 1,
+          }),
+        ).rejects.toThrow('not found in row for cursor creation')
+        leadDb.close()
+      })
+
       it('should handle cursor conditions correctly', () => {
         const token = {
           orderBy: [{ column: 'id', direction: 'asc' as const }],
@@ -1900,6 +2151,96 @@ describe('Ginger Library - Comprehensive Tests', () => {
             profile: { user_id: 2, avatar: 'avatar2.jpg' },
           },
         ])
+      })
+
+      it("pages list() by a join column that select adds to the join's configured columns", async () => {
+        // `user_id` isn't in the join's `remote.select`. The query returns it
+        // for this call, so the response carries it, and so does a cursor.
+        const ids: number[] = []
+        let cursor: string | undefined
+        for (let page = 0; page < 5; page++) {
+          const res = await serviceWithJoins.list({
+            auth: {},
+            select: ['id', '$profile.user_id'],
+            include: { profile: true },
+            orderBy: [
+              { column: '$profile.user_id', direction: 'desc' },
+              { column: 'id', direction: 'desc' },
+            ],
+            limit: 1,
+            ...(cursor ? { cursor } : {}),
+          })
+          ids.push(...res.result.map((r: { id: number }) => r.id))
+          if (!res.nextCursor) break
+          cursor = res.nextCursor
+        }
+
+        // User 3 has no profile, and NULL sorts last on DESC.
+        expect(ids).toEqual([2, 1, 3])
+      })
+
+      it('pages list() by a join column whose flat alias select changes', async () => {
+        // `$team_lead.name` has the flat alias `team_lead_name` unless an
+        // earlier join column takes it. With its configured columns, the
+        // `team` join's `lead_name` does, and `$team_lead.name` becomes
+        // `team_lead__name`; `select` narrows `team` to `id`, which leaves
+        // the name free.
+        const leadDb = new BunDatabase(':memory:')
+        leadDb.exec(
+          `CREATE TABLE accounts (id INTEGER PRIMARY KEY, team_id INTEGER, lead_id INTEGER);
+           CREATE TABLE teams (id INTEGER PRIMARY KEY, lead_name TEXT);
+           CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT);
+           INSERT INTO teams VALUES (1, 'x'), (2, 'y');
+           INSERT INTO people VALUES (1, 'Carol'), (2, 'Alice'), (3, 'Bob');
+           INSERT INTO accounts VALUES (1, 1, 1), (2, 2, 2), (3, 1, 3);`,
+        )
+        const accountService = createService({
+          table: 'accounts',
+          db: fromBunSqlite(leadDb),
+          rowSchema: z.object({
+            id: z.number(),
+            team_id: z.number(),
+            lead_id: z.number(),
+          }),
+          createSchema: z.object({ team_id: z.number() }),
+          updateSchema: z.object({ team_id: z.number().optional() }),
+          joins: {
+            team: {
+              kind: 'one' as const,
+              localColumn: 'team_id',
+              remote: { table: 'teams', pk: 'id', select: ['id', 'lead_name'] },
+              schema: z.object({ id: z.number(), lead_name: z.string() }),
+            },
+            team_lead: {
+              kind: 'one' as const,
+              localColumn: 'lead_id',
+              remote: { table: 'people', pk: 'id', select: ['name'] },
+              schema: z.object({ name: z.string() }),
+            },
+          },
+        })
+
+        const ids: number[] = []
+        let cursor: string | undefined
+        for (let page = 0; page < 5; page++) {
+          const res = await accountService.list({
+            auth: {},
+            select: ['id', '$team.id'],
+            include: { team: true, team_lead: true },
+            orderBy: [
+              { column: '$team_lead.name', direction: 'asc' },
+              { column: 'id', direction: 'asc' },
+            ],
+            limit: 1,
+            ...(cursor ? { cursor } : {}),
+          })
+          ids.push(...res.result.map((r: { id: number }) => r.id))
+          if (!res.nextCursor) break
+          cursor = res.nextCursor
+        }
+        leadDb.close()
+
+        expect(ids).toEqual([2, 3, 1])
       })
 
       it('does not strip main columns whose names share the join alias prefix', async () => {

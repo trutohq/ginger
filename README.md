@@ -407,6 +407,12 @@ const page2 = await service.list({
 })
 ```
 
+A cursor is base64-encoded JSON, neither encrypted nor signed. It holds the
+stored value of each column it orders by, which for a column the row schema
+transforms is not the value the response shows, and `select` returns stored
+values without parsing them. So don't use a row-schema transform to hide or
+mask data.
+
 ### Joins
 
 Define type-safe joins with conditional inclusion. The return type of `get` / `list` changes based on which joins are included:
@@ -583,7 +589,7 @@ Behaviour summary:
 | Aspect                       | Behaviour                                                                                                                                                                                                   |
 | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Primary key                  | Always silently included in SELECT and kept in the returned row                                                                                                                                             |
-| `orderBy` columns            | Always silently included so `nextCursor` / `prevCursor` keep working                                                                                                                                        |
+| `orderBy` columns            | Always silently included so `nextCursor` / `prevCursor` keep working, except a join column (`$alias.col`), which its join must return: when `select` names columns of that join, name the order column too  |
 | Join columns                 | Use `$alias.column` (per-call override) or `$alias` (use the join's configured `remote.select`). The join must also be enabled via `include[alias] = true` — selection alone does not auto-include.         |
 | Join column scope            | A per-call `$alias.column` may reference any column on the joined table (not just the configured `remote.select`). The join's PK is silently included.                                                      |
 | `includeSecrets`             | Independent from `select`. Secrets are surfaced only when `includeSecrets: true`, irrespective of what's in `select`. Secret `logicalName`s are not valid `select` tokens — use `includeSecrets` to opt in. |

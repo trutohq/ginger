@@ -585,10 +585,23 @@ export class Service<
       // subset and skip full schema validation (Zod would fail on missing
       // required fields). PK + orderBy columns are always present because
       // resolveMainColumns added them.
+      // What each row carries under a column's own name, for the cursors
+      // below: the response without its included joins, whose data sits
+      // under the join's name and so would read as a column of that name.
+      const carriedRows: Record<string, unknown>[] = []
       const validatedRows = processedRows.map((row) => {
         const r = row as Record<string, unknown>
         if (parsedSelect) {
-          return this.projectRow(r, include, includeSecrets)
+          const projected = this.projectRow(r, include, includeSecrets)
+          const joinNames = Object.keys(this.extractJoinData(r, include))
+          carriedRows.push(
+            Object.fromEntries(
+              Object.entries(projected).filter(
+                ([key]) => !joinNames.includes(key),
+              ),
+            ),
+          )
+          return projected
         }
         const validated = this.rowSchema.parse(this.stripSecretKeys(r))
         const base = includeSecrets
@@ -597,10 +610,12 @@ export class Service<
               ...this.extractSecretFields(r),
             }
           : (validated as Record<string, unknown>)
+        const exposed = this.extractExposedColumns(r)
+        carriedRows.push({ ...base, ...exposed })
         return {
           ...base,
           ...this.extractJoinData(r, include),
-          ...this.extractExposedColumns(r),
+          ...exposed,
         }
       })
 
@@ -620,16 +635,21 @@ export class Service<
       // a cursor over such a column fails; a `select` projection returns
       // stored values unparsed, and carries it. The response carries a row's
       // own keys, which is what JSON keeps (not `constructor`, which every
-      // row inherits), except one holding `undefined`. Over a stored NULL,
-      // that key says no more than the NULL does (a field that leaves NULL
-      // out of the response), so it carries the NULL.
+      // row inherits), except one holding `undefined`, and not one an
+      // included join's data sits under. Over a stored NULL, a key the row
+      // schema sets to `undefined` carries the NULL: for a field that leaves
+      // NULL out of the response, that says no more than the NULL. One that
+      // sets it to `undefined` whatever it holds builds a cursor over a NULL
+      // and fails over anything else, which tells the caller whether it is
+      // NULL; a hand-built cursor's own conditions on that column already
+      // tell them that.
       //
       // A joined column is carried when the query selected it for its join,
       // the join is included, and it and every join above it is a `one` join
       // (`list` returns a `many` join as `[]`). A joined column the query
       // didn't select has no key of its own: its flat name (`profile_secret`
       // for `$profile.secret`) can be a column of the base table. The
-      // fallback below still reads the parsed row under that name, as it did
+      // fallback below still reads the row under that name, as it did
       // before, so all it can take is a value the response carries.
       const cursorFlatKey = (column: string) =>
         flatColumnKeyForOrderBy(
@@ -642,13 +662,13 @@ export class Service<
         Object.hasOwn(row, key) && row[key] !== undefined
       const carriedInRow = (
         column: string,
-        parsed: Record<string, unknown>,
+        carried: Record<string, unknown>,
         storedValue: unknown,
       ): boolean => {
         if (!column.startsWith('$')) {
           return (
-            holds(parsed, column) ||
-            (Object.hasOwn(parsed, column) && storedValue === null)
+            holds(carried, column) ||
+            (Object.hasOwn(carried, column) && storedValue === null)
           )
         }
         const { joinPath, column: joinColumn } = parseQualifiedPath(column)
@@ -673,7 +693,7 @@ export class Service<
         return true
       }
       const cursorRowAt = (index: number): Record<string, unknown> => {
-        const parsed = validatedRows[index]! as Record<string, unknown>
+        const carried = carriedRows[index]!
         const stored = rows[index]!
         // Just the order-by values, with no prototype, so a column neither
         // branch below sets is missing and fails in `createCursor`.
@@ -682,13 +702,13 @@ export class Service<
           const flatKey = cursorFlatKey(order.column)
           const value = stored[flatKey]
           if (
-            carriedInRow(order.column, parsed, value) &&
+            carriedInRow(order.column, carried, value) &&
             (value === null ||
               ['string', 'number', 'boolean'].includes(typeof value))
           ) {
             cursorRow[order.column] = value
-          } else if (holds(parsed, flatKey)) {
-            cursorRow[order.column] = parsed[flatKey]
+          } else if (holds(carried, flatKey)) {
+            cursorRow[order.column] = carried[flatKey]
           }
         }
         return cursorRow

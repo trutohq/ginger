@@ -50,8 +50,13 @@ email, say). Without `select`, a column the response doesn't carry (one a
 shapeless row schema drops, one a row schema sets to `undefined`, a joined one
 the query doesn't return for its join, one of a `many` join) goes into no
 cursor, and building a cursor over it fails, with two exceptions. A key the row
-schema sets to `undefined` over a stored NULL (a field that leaves NULL out of
-the response) says no more than the NULL, which the cursor holds. And where the
+schema sets to `undefined` over a stored NULL carries the NULL into the cursor:
+for a field that leaves NULL out of the response, that says no more than the
+NULL, and for a transform that sets the key to `undefined` whatever it holds, a
+cursor is built over a NULL and fails over anything else, which tells the
+caller whether it is NULL, as a hand-built cursor's own conditions on that
+column already do. A column under the name of an included join is the join's
+data, so the base table's column of that name isn't carried. And where the
 response carries another column under a joined column's flat name
 (`profile_secret` for `$profile.secret`), the cursor takes that column's value,
 as it did before. This doesn't hide such a column: `select` returns stored

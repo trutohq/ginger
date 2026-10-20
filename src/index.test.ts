@@ -1424,6 +1424,55 @@ describe('Ginger Library - Comprehensive Tests', () => {
         profileDb.close()
       })
 
+      it('builds no cursor over a column the row schema drops under the name of an included join', async () => {
+        // The response's `profile` is the join's data, not the base column
+        // of that name, which the row schema drops.
+        const profileDb = new BunDatabase(':memory:')
+        profileDb.exec(
+          `CREATE TABLE accounts (id INTEGER PRIMARY KEY, name TEXT NOT NULL, profile TEXT NOT NULL);
+           CREATE TABLE profiles (account_id INTEGER PRIMARY KEY, bio TEXT);
+           INSERT INTO accounts VALUES (1, 'a', 'hidden-y'), (2, 'b', 'hidden-z');
+           INSERT INTO profiles VALUES (1, 'bio1'), (2, 'bio2');`,
+        )
+        const accountService = createService({
+          table: 'accounts',
+          db: fromBunSqlite(profileDb),
+          rowSchema: z
+            .object({ id: z.number(), name: z.string() })
+            .transform((row) => row),
+          createSchema: z.object({ name: z.string() }),
+          updateSchema: z.object({ name: z.string().optional() }),
+          joins: {
+            profile: {
+              kind: 'one' as const,
+              localPk: 'id',
+              remote: { table: 'profiles', pk: 'account_id', select: ['bio'] },
+              schema: z.object({ bio: z.string() }),
+            },
+          },
+        })
+
+        await expect(
+          accountService.list({
+            auth: {},
+            include: { profile: true },
+            orderBy: [{ column: 'profile', direction: 'asc' }],
+            limit: 1,
+          }),
+        ).rejects.toThrow('not found in row for cursor creation')
+        // Selected by name too: the join's data still sits under it.
+        await expect(
+          accountService.list({
+            auth: {},
+            include: { profile: true },
+            select: ['id', 'profile', '$profile.bio'],
+            orderBy: [{ column: 'profile', direction: 'asc' }],
+            limit: 1,
+          }),
+        ).rejects.toThrow('not found in row for cursor creation')
+        profileDb.close()
+      })
+
       it('builds no cursor over a column of a many join, which list returns empty', async () => {
         const teamService = createService({
           table: 'users',

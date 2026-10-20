@@ -1515,6 +1515,71 @@ describe('Ginger Library - Comprehensive Tests', () => {
         profileDb.close()
       })
 
+      it('answers a base column that shares a nested join’s name as the row schema reads it', async () => {
+        // The response took nested joins' names from the top-level row, so
+        // with the nested join included, the base column's stored value
+        // replaced the one the row schema gives (here, a masked one).
+        const nestedDb = new BunDatabase(':memory:')
+        nestedDb.exec(
+          `CREATE TABLE accounts (id INTEGER PRIMARY KEY, ssn TEXT NOT NULL, grp_id INTEGER);
+           CREATE TABLE groups (id INTEGER PRIMARY KEY, title TEXT, kid_id INTEGER);
+           CREATE TABLE kids (id INTEGER PRIMARY KEY, label TEXT);
+           INSERT INTO kids VALUES (1, 'kid-1');
+           INSERT INTO groups VALUES (1, 'g1', 1);
+           INSERT INTO accounts VALUES (1, '123-45-6789', 1);`,
+        )
+        const accountService = createService({
+          table: 'accounts',
+          db: fromBunSqlite(nestedDb),
+          rowSchema: z.object({
+            id: z.number(),
+            ssn: z.string().transform((value) => `XXX-XX-${value.slice(-4)}`),
+            grp_id: z.number().nullable(),
+          }),
+          createSchema: z.object({ ssn: z.string() }),
+          updateSchema: z.object({ ssn: z.string().optional() }),
+          joins: {
+            grp: {
+              kind: 'one' as const,
+              localColumn: 'grp_id',
+              remote: {
+                table: 'groups',
+                pk: 'id',
+                select: ['title', 'kid_id'],
+              },
+              schema: z.object({ title: z.string(), kid_id: z.number() }),
+              joins: {
+                ssn: {
+                  kind: 'one' as const,
+                  localColumn: 'kid_id',
+                  remote: { table: 'kids', pk: 'id', select: ['label'] },
+                  schema: z.object({ label: z.string() }),
+                },
+              },
+            },
+          },
+        })
+        const expected = {
+          id: 1,
+          ssn: 'XXX-XX-6789',
+          grp_id: 1,
+          grp: { title: 'g1', kid_id: 1, ssn: { label: 'kid-1' } },
+        }
+
+        const page = await accountService.list({
+          auth: {},
+          include: { grp: { ssn: true } },
+        })
+        expect(page.result).toEqual([expected])
+        expect(
+          await accountService.get(1, {
+            auth: {},
+            include: { grp: { ssn: true } },
+          }),
+        ).toEqual(expected)
+        nestedDb.close()
+      })
+
       it('pages by a base column that shares a nested join’s name', async () => {
         // A nested join's data sits inside its parent's, so the response's
         // `child` is the base column, and pages by it.

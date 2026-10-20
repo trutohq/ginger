@@ -589,19 +589,14 @@ export class Service<
       // below: the response without its included joins, whose data sits
       // under the join's name and so would read as a column of that name,
       // whether or not the row schema declares a field of that name. Only a
-      // top-level join's: a nested one's data sits inside its parent's, so a
-      // base column may share its name (`extractJoinData` names it too).
+      // top-level join's (`extractJoinData`): a nested one's data sits inside
+      // its parent's, so a base column may share its name.
       const carriedRows: Record<string, unknown>[] = []
-      const includedJoinNames = Object.keys(this.joins ?? {}).filter((name) =>
-        this.isJoinPathIncluded(name, include),
-      )
       const withoutJoins = (
         response: Record<string, unknown>,
         joinData: Record<string, unknown>,
       ): Record<string, unknown> => {
-        const joinNames = Object.keys(joinData).filter((name) =>
-          includedJoinNames.includes(name),
-        )
+        const joinNames = Object.keys(joinData)
         return Object.fromEntries(
           Object.entries(response).filter(([key]) => !joinNames.includes(key)),
         )
@@ -1528,7 +1523,11 @@ export class Service<
   }
 
   /**
-   * Extract only join data from processed row
+   * The included joins' data in a processed row: each included top-level
+   * join's under its name, with its nested joins' inside it (see
+   * `nestJoinedData`). A nested join's name isn't looked up in the row: at
+   * the top level it names something else, such as a base column, whose
+   * stored value then replaced the one the row schema gives.
    */
   private extractJoinData(
     processedRow: Record<string, unknown>,
@@ -1538,25 +1537,12 @@ export class Service<
 
     const normalized = normalizeInclude(include)
     const joinData: Record<string, unknown> = {}
-
-    function walk(
-      joins: Record<string, JoinDef>,
-      nodes: Record<string, import('./joins.js').NormalizedIncludeNode>,
-    ): void {
-      for (const joinName of Object.keys(joins)) {
-        const node = nodes[joinName]
-        if (!node?.enabled) continue
-        if (joinName in processedRow) {
-          joinData[joinName] = processedRow[joinName]
-        }
-        const def = joins[joinName]
-        if (def?.joins && Object.keys(node.children).length > 0) {
-          walk(def.joins, node.children)
-        }
+    for (const joinName of Object.keys(this.joins)) {
+      if (!normalized[joinName]?.enabled) continue
+      if (Object.prototype.hasOwnProperty.call(processedRow, joinName)) {
+        joinData[joinName] = processedRow[joinName]
       }
     }
-
-    walk(this.joins, normalized)
     return joinData
   }
 

@@ -588,13 +588,20 @@ export class Service<
       // What each row carries under a column's own name, for the cursors
       // below: the response without its included joins, whose data sits
       // under the join's name and so would read as a column of that name,
-      // whether or not the row schema declares a field of that name.
+      // whether or not the row schema declares a field of that name. Only a
+      // top-level join's: a nested one's data sits inside its parent's, so a
+      // base column may share its name (`extractJoinData` names it too).
       const carriedRows: Record<string, unknown>[] = []
+      const includedJoinNames = Object.keys(this.joins ?? {}).filter((name) =>
+        this.isJoinPathIncluded(name, include),
+      )
       const withoutJoins = (
         response: Record<string, unknown>,
         joinData: Record<string, unknown>,
       ): Record<string, unknown> => {
-        const joinNames = Object.keys(joinData)
+        const joinNames = Object.keys(joinData).filter((name) =>
+          includedJoinNames.includes(name),
+        )
         return Object.fromEntries(
           Object.entries(response).filter(([key]) => !joinNames.includes(key)),
         )

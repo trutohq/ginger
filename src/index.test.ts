@@ -1515,6 +1515,70 @@ describe('Ginger Library - Comprehensive Tests', () => {
         profileDb.close()
       })
 
+      it('pages by a base column that shares a nested join’s name', async () => {
+        // A nested join's data sits inside its parent's, so the response's
+        // `child` is the base column, and pages by it.
+        const nestedDb = new BunDatabase(':memory:')
+        nestedDb.exec(
+          `CREATE TABLE accounts (id INTEGER PRIMARY KEY, child TEXT NOT NULL, grp_id INTEGER);
+           CREATE TABLE groups (id INTEGER PRIMARY KEY, title TEXT, kid_id INTEGER);
+           CREATE TABLE kids (id INTEGER PRIMARY KEY, label TEXT);
+           INSERT INTO kids VALUES (1, 'kid-1');
+           INSERT INTO groups VALUES (1, 'g1', 1);
+           INSERT INTO accounts VALUES (1, 'c-b', 1), (2, 'c-a', 1), (3, 'c-c', 1);`,
+        )
+        const accountService = createService({
+          table: 'accounts',
+          db: fromBunSqlite(nestedDb),
+          rowSchema: z.object({
+            id: z.number(),
+            child: z.string(),
+            grp_id: z.number().nullable(),
+          }),
+          createSchema: z.object({ child: z.string() }),
+          updateSchema: z.object({ child: z.string().optional() }),
+          joins: {
+            grp: {
+              kind: 'one' as const,
+              localColumn: 'grp_id',
+              remote: {
+                table: 'groups',
+                pk: 'id',
+                select: ['title', 'kid_id'],
+              },
+              schema: z.object({ title: z.string(), kid_id: z.number() }),
+              joins: {
+                child: {
+                  kind: 'one' as const,
+                  localColumn: 'kid_id',
+                  remote: { table: 'kids', pk: 'id', select: ['label'] },
+                  schema: z.object({ label: z.string() }),
+                },
+              },
+            },
+          },
+        })
+
+        for (const select of [undefined, ['id', 'child']]) {
+          const ids: number[] = []
+          let cursor: string | undefined
+          do {
+            const page = await accountService.list({
+              auth: {},
+              include: { grp: { child: true } },
+              orderBy: [{ column: 'child', direction: 'asc' }],
+              ...(select ? { select } : {}),
+              limit: 1,
+              cursor,
+            })
+            ids.push(...page.result.map((row) => Number(row.id)))
+            cursor = page.nextCursor
+          } while (cursor)
+          expect(ids).toEqual([2, 1, 3])
+        }
+        nestedDb.close()
+      })
+
       it('pages on a runtime without Object.hasOwn', async () => {
         const pageDb = new BunDatabase(':memory:')
         pageDb.exec(

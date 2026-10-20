@@ -662,8 +662,11 @@ export class Service<
           resolvedJoinsForQuery,
           this.expose,
         )
+      // `Object.hasOwn` needs an ES2022 runtime.
+      const hasOwn = (row: Record<string, unknown>, key: string): boolean =>
+        Object.prototype.hasOwnProperty.call(row, key)
       const holds = (row: Record<string, unknown>, key: string): boolean =>
-        Object.hasOwn(row, key) && row[key] !== undefined
+        hasOwn(row, key) && row[key] !== undefined
       const carriedInRow = (
         column: string,
         carried: Record<string, unknown>,
@@ -672,7 +675,7 @@ export class Service<
         if (!column.startsWith('$')) {
           return (
             holds(carried, column) ||
-            (Object.hasOwn(carried, column) && storedValue === null)
+            (hasOwn(carried, column) && storedValue === null)
           )
         }
         const { joinPath, column: joinColumn } = parseQualifiedPath(column)

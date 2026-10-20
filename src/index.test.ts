@@ -1515,6 +1515,39 @@ describe('Ginger Library - Comprehensive Tests', () => {
         profileDb.close()
       })
 
+      it('pages on a runtime without Object.hasOwn', async () => {
+        const pageDb = new BunDatabase(':memory:')
+        pageDb.exec(
+          `CREATE TABLE notes (id INTEGER PRIMARY KEY, title TEXT NOT NULL);
+           INSERT INTO notes VALUES (1, 'a'), (2, 'b');`,
+        )
+        const noteService = createService({
+          table: 'notes',
+          db: fromBunSqlite(pageDb),
+          rowSchema: z.object({ id: z.number(), title: z.string() }),
+          createSchema: z.object({ title: z.string() }),
+          updateSchema: z.object({ title: z.string().optional() }),
+        })
+        const { hasOwn } = Object
+        delete (Object as { hasOwn?: unknown }).hasOwn
+        try {
+          const page = await noteService.list({
+            auth: {},
+            orderBy: [{ column: 'title', direction: 'asc' }],
+            limit: 1,
+          })
+          const next = await noteService.list({
+            auth: {},
+            cursor: page.nextCursor,
+            limit: 1,
+          })
+          expect(next.result.map((row) => row.id)).toEqual([2])
+        } finally {
+          Object.hasOwn = hasOwn
+          pageDb.close()
+        }
+      })
+
       it('builds no cursor over a column of a many join, which list returns empty', async () => {
         const teamService = createService({
           table: 'users',

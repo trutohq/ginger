@@ -587,20 +587,24 @@ export class Service<
       // resolveMainColumns added them.
       // What each row carries under a column's own name, for the cursors
       // below: the response without its included joins, whose data sits
-      // under the join's name and so would read as a column of that name.
+      // under the join's name and so would read as a column of that name,
+      // whether or not the row schema declares a field of that name.
       const carriedRows: Record<string, unknown>[] = []
+      const withoutJoins = (
+        response: Record<string, unknown>,
+        joinData: Record<string, unknown>,
+      ): Record<string, unknown> => {
+        const joinNames = Object.keys(joinData)
+        return Object.fromEntries(
+          Object.entries(response).filter(([key]) => !joinNames.includes(key)),
+        )
+      }
       const validatedRows = processedRows.map((row) => {
         const r = row as Record<string, unknown>
+        const joinData = this.extractJoinData(r, include)
         if (parsedSelect) {
           const projected = this.projectRow(r, include, includeSecrets)
-          const joinNames = Object.keys(this.extractJoinData(r, include))
-          carriedRows.push(
-            Object.fromEntries(
-              Object.entries(projected).filter(
-                ([key]) => !joinNames.includes(key),
-              ),
-            ),
-          )
+          carriedRows.push(withoutJoins(projected, joinData))
           return projected
         }
         const validated = this.rowSchema.parse(this.stripSecretKeys(r))
@@ -611,10 +615,10 @@ export class Service<
             }
           : (validated as Record<string, unknown>)
         const exposed = this.extractExposedColumns(r)
-        carriedRows.push({ ...base, ...exposed })
+        carriedRows.push(withoutJoins({ ...base, ...exposed }, joinData))
         return {
           ...base,
-          ...this.extractJoinData(r, include),
+          ...joinData,
           ...exposed,
         }
       })

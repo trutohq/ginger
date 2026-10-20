@@ -56,7 +56,8 @@ NULL, and for a transform that sets the key to `undefined` whatever it holds, a
 cursor is built over a NULL and fails over anything else, which tells the
 caller whether it is NULL, as a hand-built cursor's own conditions on that
 column already do. A column under the name of an included join is the join's
-data, so the base table's column of that name isn't carried. And where the
+data, so the base table's column of that name isn't carried, whether or not the
+row schema declares a field of that name. And where the
 response carries another column under a joined column's flat name
 (`profile_secret` for `$profile.secret`), the cursor takes that column's value,
 as it did before. This doesn't hide such a column: `select` returns stored

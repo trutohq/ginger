@@ -1580,6 +1580,75 @@ describe('Ginger Library - Comprehensive Tests', () => {
         nestedDb.close()
       })
 
+      it('leaves out a base column a shapeless row schema drops, though a nested join shares its name', async () => {
+        // 2.x answered the dropped column anyway, at the top level with its
+        // stored value, and so paged by it.
+        const nestedDb = new BunDatabase(':memory:')
+        nestedDb.exec(
+          `CREATE TABLE accounts (id INTEGER PRIMARY KEY, kid TEXT NOT NULL, grp_id INTEGER);
+           CREATE TABLE groups (id INTEGER PRIMARY KEY, title TEXT, kid_id INTEGER);
+           CREATE TABLE kids (id INTEGER PRIMARY KEY, label TEXT);
+           INSERT INTO kids VALUES (1, 'kid-1');
+           INSERT INTO groups VALUES (1, 'g1', 1);
+           INSERT INTO accounts VALUES (1, 'K1', 1), (2, 'K2', 1);`,
+        )
+        const accountService = createService({
+          table: 'accounts',
+          db: fromBunSqlite(nestedDb),
+          rowSchema: z
+            .object({ id: z.number(), grp_id: z.number().nullable() })
+            .transform((row) => row),
+          createSchema: z.object({ kid: z.string() }),
+          updateSchema: z.object({ kid: z.string().optional() }),
+          joins: {
+            grp: {
+              kind: 'one' as const,
+              localColumn: 'grp_id',
+              remote: {
+                table: 'groups',
+                pk: 'id',
+                select: ['title', 'kid_id'],
+              },
+              schema: z.object({ title: z.string(), kid_id: z.number() }),
+              joins: {
+                kid: {
+                  kind: 'one' as const,
+                  localColumn: 'kid_id',
+                  remote: { table: 'kids', pk: 'id', select: ['label'] },
+                  schema: z.object({ label: z.string() }),
+                },
+              },
+            },
+          },
+        })
+        const include = { grp: { kid: true } }
+        const expected = {
+          id: 1,
+          grp_id: 1,
+          grp: { title: 'g1', kid_id: 1, kid: { label: 'kid-1' } },
+        }
+
+        const page = await accountService.list({
+          auth: {},
+          include,
+          orderBy: [{ column: 'id', direction: 'asc' }],
+          limit: 1,
+        })
+        expect(page.result).toEqual([expected])
+        expect(await accountService.get(1, { auth: {}, include })).toEqual(
+          expected,
+        )
+        await expect(
+          accountService.list({
+            auth: {},
+            include,
+            orderBy: [{ column: 'kid', direction: 'asc' }],
+            limit: 1,
+          }),
+        ).rejects.toThrow('not found in row for cursor creation')
+        nestedDb.close()
+      })
+
       it('pages by a base column that shares a nested join’s name', async () => {
         // A nested join's data sits inside its parent's, so the response's
         // `child` is the base column, and pages by it.

@@ -61,7 +61,10 @@ column of that name, whether or not the row schema declares a field of that
 name, nor an `expose` alias of that name, which the response shows the join's
 data in place of (ordering by one doesn't page). A nested join's data sits
 inside its parent's, so a base column that shares a nested join's name pages as
-before, and the response gives it as the row schema reads it. And where the
+before, unless the row schema leaves it out, and the response gives it as the
+row schema reads it. One a shapeless row schema drops is no longer in the
+response (`nested-join-name-response`), so it goes into no cursor, and ordering
+by it throws where 2.x paged it. And where the
 response carries another column under a joined column's flat name
 (`profile_secret` for `$profile.secret`), the cursor takes that column's value,
 as it did before. This doesn't hide such a column: `select` returns stored

@@ -22,6 +22,7 @@ import {
   legacyJoinColumnAlias,
   nestJoinedData,
   normalizeInclude,
+  parseQualifiedPath,
   resolveActiveJoins,
   resolveOrderByColumn,
   topLevelIncludeFlags,
@@ -472,9 +473,6 @@ export class Service<
       const resolveColumn = (column: string) =>
         resolveOrderByColumn(column, this.table, resolvedJoins, this.expose)
 
-      const cursorFlatKey = (column: string) =>
-        flatColumnKeyForOrderBy(column, this.table, resolvedJoins, this.expose)
-
       // Handle cursor pagination
       let cursorConditions: ReturnType<typeof sql> | undefined
       let actualLimit = limit + 1 // Fetch one extra to determine if there's a next page
@@ -508,6 +506,7 @@ export class Service<
             cursorToken,
             this.table,
             resolveColumn,
+            (column) => this.columnAcceptsNull(column),
           )
         } catch (error) {
           throw new ValidationError(
@@ -586,10 +585,29 @@ export class Service<
       // subset and skip full schema validation (Zod would fail on missing
       // required fields). PK + orderBy columns are always present because
       // resolveMainColumns added them.
+      // What each row carries under a column's own name, for the cursors
+      // below: the response without its included joins, whose data sits
+      // under the join's name and so would read as a column of that name,
+      // whether or not the row schema declares a field of that name. Only a
+      // top-level join's (`extractJoinData`): a nested one's data sits inside
+      // its parent's, so a base column may share its name.
+      const carriedRows: Record<string, unknown>[] = []
+      const withoutJoins = (
+        response: Record<string, unknown>,
+        joinData: Record<string, unknown>,
+      ): Record<string, unknown> => {
+        const joinNames = Object.keys(joinData)
+        return Object.fromEntries(
+          Object.entries(response).filter(([key]) => !joinNames.includes(key)),
+        )
+      }
       const validatedRows = processedRows.map((row) => {
         const r = row as Record<string, unknown>
+        const joinData = this.extractJoinData(r, include)
         if (parsedSelect) {
-          return this.projectRow(r, include, includeSecrets)
+          const projected = this.projectRow(r, include, includeSecrets)
+          carriedRows.push(withoutJoins(projected, joinData))
+          return projected
         }
         const validated = this.rowSchema.parse(this.stripSecretKeys(r))
         const base = includeSecrets
@@ -598,43 +616,131 @@ export class Service<
               ...this.extractSecretFields(r),
             }
           : (validated as Record<string, unknown>)
+        const exposed = this.extractExposedColumns(r)
+        carriedRows.push(withoutJoins({ ...base, ...exposed }, joinData))
         return {
           ...base,
-          ...this.extractJoinData(r, include),
-          ...this.extractExposedColumns(r),
+          ...joinData,
+          ...exposed,
         }
       })
 
-      // Generate cursors
+      // Generate cursors. A cursor holds the order-by values as the database
+      // returned them, since the next page compares them with the stored
+      // values: a column the row schema transforms reads back in another
+      // form (a `z.coerce.date()` over `YYYY-MM-DD HH:MM:SS` text serialises
+      // as ISO text, and `T` sorts after the space). The parsed row is the
+      // fallback for a value the query returned under no flat key, or in a
+      // form a cursor can't carry (a driver's bigint, say).
+      //
+      // Only for a column the response carries. A cursor is readable, and
+      // its own orderBy orders the page it fetches, so a stored value of any
+      // other column (one a shapeless row schema drops, one a row schema sets
+      // to `undefined`, one of a join resolved only for `expose`) would hand
+      // the caller what the response leaves out. Without `select`, building
+      // a cursor over such a column fails; a `select` projection returns
+      // stored values unparsed, and carries it. The response carries a row's
+      // own keys, which is what JSON keeps (not `constructor`, which every
+      // row inherits), except one holding `undefined`, and not one an
+      // included join's data sits under. Over a stored NULL, a key the row
+      // schema sets to `undefined` carries the NULL: for a field that leaves
+      // NULL out of the response, that says no more than the NULL. One that
+      // sets it to `undefined` whatever it holds builds a cursor over a NULL
+      // and fails over anything else, which tells the caller whether it is
+      // NULL; a hand-built cursor's own conditions on that column already
+      // tell them that.
+      //
+      // A joined column is carried when the query selected it for its join,
+      // the join is included, and it and every join above it is a `one` join
+      // (`list` returns a `many` join as `[]`). A joined column the query
+      // didn't select has no key of its own: its flat name (`profile_secret`
+      // for `$profile.secret`) can be a column of the base table. The
+      // fallback below still reads the row under that name, as it did
+      // before, so all it can take is a value the response carries.
+      const cursorFlatKey = (column: string) =>
+        flatColumnKeyForOrderBy(
+          column,
+          this.table,
+          resolvedJoinsForQuery,
+          this.expose,
+        )
+      // `Object.hasOwn` needs an ES2022 runtime.
+      const hasOwn = (row: Record<string, unknown>, key: string): boolean =>
+        Object.prototype.hasOwnProperty.call(row, key)
+      const holds = (row: Record<string, unknown>, key: string): boolean =>
+        hasOwn(row, key) && row[key] !== undefined
+      const carriedInRow = (
+        column: string,
+        carried: Record<string, unknown>,
+        storedValue: unknown,
+      ): boolean => {
+        if (!column.startsWith('$')) {
+          return (
+            holds(carried, column) ||
+            (hasOwn(carried, column) && storedValue === null)
+          )
+        }
+        const { joinPath, column: joinColumn } = parseQualifiedPath(column)
+        const join =
+          resolvedJoinsForQuery.find((r) => r.path === joinPath) ??
+          resolvedJoinsForQuery.find(
+            (r) => r.name === joinPath || r.sqlTable === joinPath,
+          )
+        if (
+          !join ||
+          !join.select.includes(joinColumn) ||
+          !this.isJoinPathIncluded(join.path, include)
+        ) {
+          return false
+        }
+        let defs: Record<string, JoinDef> | undefined = this.joins
+        for (const name of join.path.split('.')) {
+          const def: JoinDef | undefined = defs?.[name]
+          if (def?.kind !== 'one') return false
+          defs = def.joins
+        }
+        return true
+      }
+      const cursorRowAt = (index: number): Record<string, unknown> => {
+        const carried = carriedRows[index]!
+        const stored = rows[index]!
+        // Just the order-by values, with no prototype, so a column neither
+        // branch below sets is missing and fails in `createCursor`.
+        const cursorRow: Record<string, unknown> = Object.create(null)
+        for (const order of orderBy) {
+          const flatKey = cursorFlatKey(order.column)
+          const value = stored[flatKey]
+          if (
+            carriedInRow(order.column, carried, value) &&
+            (value === null ||
+              ['string', 'number', 'boolean'].includes(typeof value))
+          ) {
+            cursorRow[order.column] = value
+          } else if (holds(carried, flatKey)) {
+            cursorRow[order.column] = carried[flatKey]
+          }
+        }
+        return cursorRow
+      }
+
       let nextCursor: string | undefined
       let prevCursor: string | undefined
 
       if (validatedRows.length > 0) {
         if (hasNextPage) {
-          const lastRow = validatedRows[validatedRows.length - 1]! as Record<
-            string,
-            unknown
-          >
-          const cursorRow = { ...lastRow }
-          for (const order of orderBy) {
-            const flatKey = cursorFlatKey(order.column)
-            if (flatKey !== order.column && flatKey in lastRow) {
-              cursorRow[order.column] = lastRow[flatKey]
-            }
-          }
-          nextCursor = encodeCursor(createCursor(cursorRow, orderBy, 'next'))
+          nextCursor = encodeCursor(
+            createCursor(
+              cursorRowAt(validatedRows.length - 1),
+              orderBy,
+              'next',
+            ),
+          )
         }
 
         if (cursor) {
-          const firstRow = validatedRows[0]! as Record<string, unknown>
-          const cursorRow = { ...firstRow }
-          for (const order of orderBy) {
-            const flatKey = cursorFlatKey(order.column)
-            if (flatKey !== order.column && flatKey in firstRow) {
-              cursorRow[order.column] = firstRow[flatKey]
-            }
-          }
-          prevCursor = encodeCursor(createCursor(cursorRow, orderBy, 'prev'))
+          prevCursor = encodeCursor(
+            createCursor(cursorRowAt(0), orderBy, 'prev'),
+          )
         }
       }
 
@@ -1115,6 +1221,45 @@ export class Service<
   }
 
   /**
+   * Whether the row schema lets `column` hold NULL, which decides whether the
+   * cursor conditions on it are NULL-aware (see `buildCursorConditions`). A
+   * column the shape doesn't describe, such as a joined one that a LEFT JOIN
+   * can leave NULL, counts as nullable. So does a field that accepts NULL but
+   * reads it as another value (a `transform`, `catch` or `coerce`): the
+   * column can still hold NULL, and the cursor carries the stored value, NULL
+   * included, not what the field reads it as. A joined or exposed column is
+   * added to the row after the row schema runs, so it counts whatever the
+   * schema says.
+   *
+   * Nothing depends on whether the row schema rewrites the row any more:
+   * with cursors built from the parsed row, a schema that read a stored NULL
+   * as a value (or a value as NULL) put that value in the cursor, so an
+   * `IS NULL` branch beside it paged forever, and a rewriting schema had to
+   * keep the SQL from before NULL-aware cursors, which skipped its NULL rows.
+   */
+  private columnAcceptsNull(column: string): boolean {
+    if (
+      column.startsWith('$') ||
+      this.expose?.some((exposed) => exposed.as === column)
+    ) {
+      return true
+    }
+    const { shape } = this.rowSchema as unknown as {
+      shape?: Record<
+        string,
+        { safeParse?: (value: unknown) => { success: boolean } } | undefined
+      >
+    }
+    const field = shape?.[column]
+    if (typeof field?.safeParse !== 'function') return true
+    try {
+      return field.safeParse(null).success === true
+    } catch {
+      return true
+    }
+  }
+
+  /**
    * Execute custom SQL query
    */
   async query<T = z.infer<TRow>>(
@@ -1378,7 +1523,11 @@ export class Service<
   }
 
   /**
-   * Extract only join data from processed row
+   * The included joins' data in a processed row: each included top-level
+   * join's under its name, with its nested joins' inside it (see
+   * `nestJoinedData`). A nested join's name isn't looked up in the row: at
+   * the top level it names something else, such as a base column, whose
+   * stored value then replaced the one the row schema gives.
    */
   private extractJoinData(
     processedRow: Record<string, unknown>,
@@ -1388,25 +1537,12 @@ export class Service<
 
     const normalized = normalizeInclude(include)
     const joinData: Record<string, unknown> = {}
-
-    function walk(
-      joins: Record<string, JoinDef>,
-      nodes: Record<string, import('./joins.js').NormalizedIncludeNode>,
-    ): void {
-      for (const joinName of Object.keys(joins)) {
-        const node = nodes[joinName]
-        if (!node?.enabled) continue
-        if (joinName in processedRow) {
-          joinData[joinName] = processedRow[joinName]
-        }
-        const def = joins[joinName]
-        if (def?.joins && Object.keys(node.children).length > 0) {
-          walk(def.joins, node.children)
-        }
+    for (const joinName of Object.keys(this.joins)) {
+      if (!normalized[joinName]?.enabled) continue
+      if (Object.prototype.hasOwnProperty.call(processedRow, joinName)) {
+        joinData[joinName] = processedRow[joinName]
       }
     }
-
-    walk(this.joins, normalized)
     return joinData
   }
 

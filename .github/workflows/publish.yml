@@ -51,6 +51,10 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
+      - name: Update npm (trusted publishing needs npm 11.5.1+)
+        if: steps.version_check.outputs.should_publish == 'true'
+        run: npm install -g npm@latest
+
       - name: Install dependencies
         if: steps.version_check.outputs.should_publish == 'true'
         run: bun install --frozen-lockfile
@@ -74,8 +78,6 @@ jobs:
       - name: Publish to npm
         if: steps.version_check.outputs.should_publish == 'true'
         run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Create git tag and GitHub release
         if: steps.version_check.outputs.should_publish == 'true'

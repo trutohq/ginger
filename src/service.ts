@@ -27,6 +27,7 @@ import {
   resolveOrderByColumn,
   topLevelIncludeFlags,
   validateOrderByWithJoins,
+  validateWhere,
 } from './joins.js'
 import {
   buildCount,
@@ -456,6 +457,7 @@ export class Service<
 
       // Validate order by columns (skip if schema shape is unavailable)
       const allowedColumns = this.getAllowedColumns()
+      validateWhere(where, allowedColumns, resolvedJoins, this.expose)
       if (!allowedColumns.includes('*')) {
         if (resolvedJoins.length > 0) {
           validateOrderByWithJoins(
@@ -1189,6 +1191,7 @@ export class Service<
       const { where = {}, include = {} } = params
 
       const { resolved: resolvedJoins } = this.prepareJoinContext(include)
+      validateWhere(where, this.getAllowedColumns(), resolvedJoins, this.expose)
 
       const pk = Array.isArray(this.primaryKey)
         ? this.primaryKey[0]!

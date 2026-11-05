@@ -3876,6 +3876,107 @@ describe('Ginger Library - Comprehensive Tests', () => {
       expect(page2.result).toHaveLength(1)
       expect(page2.prevCursor).toBeDefined()
     })
+
+    describe('where key validation', () => {
+      it.each([
+        ['a key that is not an identifier', { '-s': '1' }],
+        ['a key with a quote', { "sta'tus": 'x' }],
+        ['a column the table does not have', { foo: 'foo' }],
+        ['a JSON path into a column it does not have', { 'class.module.x': 1 }],
+        ['an unknown column inside or', { or: [{ foo: 'x' }] }],
+        [
+          'an unknown column inside nested and/or',
+          { and: [{ or: [{ foo: 1 }] }] },
+        ],
+        ['an unknown column in an operator block', { foo: { gt: 1 } }],
+        ['an empty JSON path segment', { 'status.': 'x' }],
+        ['or that is not an array', { or: { status: 'active' } }],
+        [
+          'a join path when the join is not included',
+          { 'integration.name': 'x' },
+        ],
+        ['a prototype key', JSON.parse('{"__proto__": 1}')],
+      ])('list and count refuse %s', async (_label, where) => {
+        await expect(iaService.list({ auth: {}, where })).rejects.toThrow(
+          ValidationError,
+        )
+        await expect(iaService.count({ auth: {}, where })).rejects.toThrow(
+          ValidationError,
+        )
+      })
+
+      it('does not answer every row for a filter on a missing column', async () => {
+        // Before the check, SQLite read "foo" as the string 'foo' and matched all rows.
+        await expect(
+          iaService.list({ auth: {}, where: { foo: 'foo' } }),
+        ).rejects.toThrow(ValidationError)
+      })
+
+      it('accepts columns, operator blocks, expose aliases, and/or and included join paths', async () => {
+        const base = await iaService.list({
+          auth: {},
+          where: { status: 'active', tenant_id: { in: ['tnt-1'] } },
+        })
+        expect(base.result).toHaveLength(2)
+
+        const exposed = await iaService.list({
+          auth: {},
+          where: { environment_id: 'env-2' },
+        })
+        expect(exposed.result).toHaveLength(1)
+
+        const nested = await iaService.list({
+          auth: {},
+          where: {
+            and: [{ or: [{ status: 'inactive' }, { tenant_id: 'tnt-1' }] }],
+          },
+        })
+        expect(nested.result).toHaveLength(3)
+
+        const joined = await iaService.list({
+          auth: {},
+          include: { environment_integration: true },
+          where: { 'environment_integration.environment_id': 'env-1' },
+        })
+        expect(joined.result).toHaveLength(2)
+
+        expect(
+          await iaService.count({ auth: {}, where: { status: 'active' } }),
+        ).toBe(2)
+      })
+
+      it('lets a JSON path into a real column through, and any key through when the schema has no shape', async () => {
+        const shapeless = createService({
+          table: 'integration',
+          db,
+          rowSchema: z
+            .object({ id: z.string() })
+            .or(z.object({ name: z.string() })),
+          createSchema: z.object({ id: z.string() }),
+          updateSchema: z.object({ name: z.string().optional() }),
+        })
+        // No `.shape` on the union: only the identifier check applies.
+        await expect(
+          shapeless.list({ auth: {}, where: { '-s': 1 } }),
+        ).rejects.toThrow(ValidationError)
+        await expect(
+          shapeless.list({ auth: {}, where: { 'config.label': 'SF' } }),
+        ).resolves.toBeDefined()
+
+        const withConfig = createService({
+          table: 'integration',
+          db,
+          rowSchema: IntegrationRowSchema,
+          createSchema: IntegrationRowSchema,
+          updateSchema: z.object({ name: z.string().optional() }),
+        })
+        const hit = await withConfig.list({
+          auth: {},
+          where: { 'config.label': 'SF' },
+        })
+        expect(hit.result).toHaveLength(1)
+      })
+    })
   })
 
   describe('join column alias compatibility', () => {

@@ -1,5 +1,5 @@
 import { compileFilter, sql } from '@truto/sqlite-builder'
-import { CursorError, SqlBuilderError } from './errors.js'
+import { CursorError, SqlBuilderError, ValidationError } from './errors.js'
 import type { ExposeDef, IncludeMap, JoinDef, OrderBy } from './types.js'
 
 /** Keys that must never be used as dynamic object property names. */
@@ -718,4 +718,91 @@ export function validateOrderByWithJoins(
       )
     }
   }
+}
+
+/** What `sql.ident()` accepts: a column, optionally followed by a JSON path. */
+const WHERE_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$/
+
+function shownKey(key: string): string {
+  return key.length > 64 ? `${key.slice(0, 64)}...` : key
+}
+
+/**
+ * Check the keys of a `where` filter before they reach the SQL builder.
+ *
+ * The builder compiles whatever it is given. A key that is not an identifier
+ * threw a `TypeError` out of `sql.ident()` (a 500 quoting the builder's
+ * message). A key that is an identifier but not a column was worse: SQLite
+ * reads a double-quoted name it cannot resolve as a string literal, so
+ * `{ foo: 'bar' }` matched nothing, `{ foo: 'foo' }` matched every row, and a
+ * dotted key died in `json_extract` ("malformed JSON"). `select`, `orderBy`
+ * and cursors were already checked; `where` was the open path.
+ *
+ * A key may be a column of the table, a JSON path into one (`meta.team.id`),
+ * an `expose` alias, a path into an included join (`integration.name`), a
+ * `$alias` / `$table.column` join filter (left to the builder), or an `and` /
+ * `or` array of filters (checked recursively). Anything else throws a
+ * `ValidationError`.
+ *
+ * `allowedColumns` containing `'*'` means the schema exposes no shape; only
+ * the identifier check applies then.
+ */
+export function validateWhere(
+  where: Record<string, unknown>,
+  allowedColumns: readonly string[],
+  resolved: readonly ResolvedJoin[],
+  expose: readonly ExposeDef[] | undefined,
+): void {
+  const anyColumn = allowedColumns.includes('*')
+  const columns = new Set(allowedColumns.map((c) => c.toLowerCase()))
+  const aliases = new Set((expose ?? []).map((e) => e.as))
+
+  const check = (filter: Record<string, unknown>): void => {
+    if (
+      typeof filter !== 'object' ||
+      filter === null ||
+      Array.isArray(filter)
+    ) {
+      throw new ValidationError('A filter must be an object of field names.')
+    }
+    for (const [key, value] of Object.entries(filter)) {
+      if (key === 'and' || key === 'or') {
+        if (!Array.isArray(value)) {
+          throw new ValidationError(
+            `"${key}" must be an array of filter objects.`,
+          )
+        }
+        for (const clause of value) {
+          check(clause as Record<string, unknown>)
+        }
+        continue
+      }
+      if (key.startsWith('$')) {
+        continue
+      }
+      if (!WHERE_KEY_PATTERN.test(key)) {
+        throw new ValidationError(
+          `"${shownKey(key)}" is not a valid filter field.`,
+        )
+      }
+      if (aliases.has(key) || anyColumn) {
+        continue
+      }
+      const [root = ''] = key.split('.')
+      if (columns.has(root.toLowerCase())) {
+        continue
+      }
+      if (
+        key.includes('.') &&
+        resolved.some(
+          (r) => r.path === root || r.name === root || r.sqlTable === root,
+        )
+      ) {
+        continue
+      }
+      throw new ValidationError(`Unknown filter field "${shownKey(root)}".`)
+    }
+  }
+
+  check(where)
 }

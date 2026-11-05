@@ -477,6 +477,8 @@ export function translateWhereForJoins(
 
   for (const [key, value] of Object.entries(where)) {
     if (isUnsafeObjectKey(key)) continue
+    // The builder skips undefined entries; `and: undefined` must not reach `.map`.
+    if (value === undefined) continue
 
     if (key === 'and' || key === 'or') {
       safeSet(
@@ -740,24 +742,41 @@ function shownKey(key: string): string {
  *
  * A key may be a column of the table, a JSON path into one (`meta.team.id`),
  * an `expose` alias, a path into an included join (`integration.name`), a
- * `$alias` / `$table.column` join filter (left to the builder), or an `and` /
- * `or` array of filters (checked recursively). Anything else throws a
- * `ValidationError`.
+ * `$alias` / `$table.column` join filter (its names are checked, the table
+ * is left to the builder), or an `and` / `or` array of filters (checked
+ * recursively). Entries whose value is `undefined` are skipped, as the
+ * builder skips them. Anything else throws a `ValidationError`.
  *
  * `allowedColumns` containing `'*'` means the schema exposes no shape; only
  * the identifier check applies then.
+ *
+ * `aliasNeedsJoin`: `buildCount` rewrites `expose` aliases only when a join is
+ * active, so without one an alias reads as a string literal and matches every
+ * row or none. `count()` sets this to refuse the alias in that case.
  */
 export function validateWhere(
   where: Record<string, unknown>,
   allowedColumns: readonly string[],
   resolved: readonly ResolvedJoin[],
   expose: readonly ExposeDef[] | undefined,
+  options: { aliasNeedsJoin?: boolean } = {},
 ): void {
   const anyColumn = allowedColumns.includes('*')
   const columns = new Set(allowedColumns.map((c) => c.toLowerCase()))
   const aliases = new Set((expose ?? []).map((e) => e.as))
 
-  const check = (filter: Record<string, unknown>): void => {
+  const checkName = (key: string): void => {
+    if (!WHERE_KEY_PATTERN.test(key)) {
+      throw new ValidationError(
+        `"${shownKey(key)}" is not a valid filter field.`,
+      )
+    }
+  }
+
+  const check = (
+    filter: Record<string, unknown>,
+    inJoinBlock = false,
+  ): void => {
     if (
       typeof filter !== 'object' ||
       filter === null ||
@@ -766,6 +785,9 @@ export function validateWhere(
       throw new ValidationError('A filter must be an object of field names.')
     }
     for (const [key, value] of Object.entries(filter)) {
+      if (value === undefined) {
+        continue
+      }
       if (key === 'and' || key === 'or') {
         if (!Array.isArray(value)) {
           throw new ValidationError(
@@ -773,19 +795,31 @@ export function validateWhere(
           )
         }
         for (const clause of value) {
-          check(clause as Record<string, unknown>)
+          check(clause as Record<string, unknown>, inJoinBlock)
         }
         continue
       }
       if (key.startsWith('$')) {
+        checkName(key.slice(1))
+        if (typeof value === 'object' && value !== null) {
+          check(value as Record<string, unknown>, true)
+        }
         continue
       }
-      if (!WHERE_KEY_PATTERN.test(key)) {
-        throw new ValidationError(
-          `"${shownKey(key)}" is not a valid filter field.`,
-        )
+      checkName(key)
+      if (inJoinBlock) {
+        // Columns of a joined table: its schema is not known here.
+        continue
       }
-      if (aliases.has(key) || anyColumn) {
+      if (aliases.has(key)) {
+        if (options.aliasNeedsJoin && resolved.length === 0) {
+          throw new ValidationError(
+            `Filter field "${shownKey(key)}" is an alias of a joined column; include its join to filter on it.`,
+          )
+        }
+        continue
+      }
+      if (anyColumn) {
         continue
       }
       const [root = ''] = key.split('.')

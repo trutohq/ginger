@@ -1191,7 +1191,15 @@ export class Service<
       const { where = {}, include = {} } = params
 
       const { resolved: resolvedJoins } = this.prepareJoinContext(include)
-      validateWhere(where, this.getAllowedColumns(), resolvedJoins, this.expose)
+      validateWhere(
+        where,
+        this.getAllowedColumns(),
+        resolvedJoins,
+        this.expose,
+        {
+          aliasNeedsJoin: true,
+        },
+      )
 
       const pk = Array.isArray(this.primaryKey)
         ? this.primaryKey[0]!

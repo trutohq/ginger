@@ -3905,13 +3905,6 @@ describe('Ginger Library - Comprehensive Tests', () => {
         )
       })
 
-      it('does not answer every row for a filter on a missing column', async () => {
-        // Before the check, SQLite read "foo" as the string 'foo' and matched all rows.
-        await expect(
-          iaService.list({ auth: {}, where: { foo: 'foo' } }),
-        ).rejects.toThrow(ValidationError)
-      })
-
       it('accepts columns, operator blocks, expose aliases, and/or and included join paths', async () => {
         const base = await iaService.list({
           auth: {},
@@ -3942,6 +3935,58 @@ describe('Ginger Library - Comprehensive Tests', () => {
 
         expect(
           await iaService.count({ auth: {}, where: { status: 'active' } }),
+        ).toBe(2)
+      })
+
+      it('skips entries whose value is undefined, as the builder does', async () => {
+        const rows = await iaService.list({
+          auth: {},
+          where: { and: undefined, foo: undefined, status: 'active' },
+        })
+        expect(rows.result).toHaveLength(2)
+      })
+
+      it('checks the names inside $ join filters', async () => {
+        await expect(
+          iaService.list({
+            auth: {},
+            include: { environment_integration: true },
+            where: { $environment_integration: { 'a b': 1 } },
+          }),
+        ).rejects.toThrow(ValidationError)
+        await expect(
+          iaService.list({ auth: {}, where: { '$x y': { id: 1 } } }),
+        ).rejects.toThrow(ValidationError)
+        const ok = await iaService.list({
+          auth: {},
+          include: { environment_integration: true },
+          where: { $environment_integration: { environment_id: 'env-1' } },
+        })
+        expect(ok.result).toHaveLength(2)
+      })
+
+      it('refuses a column that exists in the table but not in the row schema', async () => {
+        // The schema is the allow-list, as it is for select and orderBy.
+        bunDb.exec('ALTER TABLE integrated_account ADD COLUMN hidden TEXT')
+        await expect(
+          iaService.list({ auth: {}, where: { hidden: 'h' } }),
+        ).rejects.toThrow(ValidationError)
+      })
+
+      it('count refuses an expose alias with no active join instead of matching every row', async () => {
+        const own = createService({
+          table: 'integrated_account',
+          db,
+          rowSchema: IntegratedAccountRowSchema,
+          createSchema: IntegratedAccountRowSchema,
+          updateSchema: z.object({ status: z.string().optional() }),
+          expose: [{ from: '$integrated_account.tenant_id', as: 'tid' }],
+        })
+        await expect(
+          own.count({ auth: {}, where: { tid: 'tid' } }),
+        ).rejects.toThrow(ValidationError)
+        expect(
+          await own.count({ auth: {}, where: { tenant_id: 'tnt-1' } }),
         ).toBe(2)
       })
 
